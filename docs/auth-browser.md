@@ -220,6 +220,20 @@ bash tests/auth-wpe-smoke/run.sh "$auth_cache"
 bash tests/auth-wpe-smoke/run.sh "$auth_cache" --public
 ```
 
+The WPE smoke containers need two host-side accommodations. First, the SDK
+image ships no `/etc/fonts`, and the web process aborts on the missing
+fontconfig configuration; copy the SDK sysroot's `etc/fonts` and
+`usr/share/fonts` into the image (or install a font package) before the run.
+Second, the engine is built with `-mbranch-protection=standard`, so every ELF
+carries AArch64 BTI/PAC GNU property notes. The tablet's Cortex-A53 treats
+those instructions as hints and runs them correctly. Hosts that actually
+enforce branch protection (for example Linux VMs on Apple Silicon) guard the
+code pages, and LLInt's computed-goto dispatch then traps with SIGILL before
+any page loads. To run the container suite on such a host, strip
+`.note.gnu.property` with `objcopy` from a scratch copy of the runtime and run
+against that copy; the shipped artifacts are unaffected. Neither workaround
+touches device behavior.
+
 The launcher tests execute the real script from a relocated temporary directory
 with stub runtime/native-entry fixtures. They check literal arguments, derived
 runtime paths, cleared overrides, private umask/core limits, same-PID execution,
