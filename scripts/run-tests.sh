@@ -18,6 +18,8 @@ for t in tests/*_test.sh; do
   name="$(basename "$t" .sh)"
   if bash "$t"; then :; else echo "FAIL (shell): $name"; fail=1; fi
 done
+# Fake captive portal (tools/fake-portal) — Python stdlib unittest; its TLS cases skip without an OpenSSL 3 binary.
+python3 -m unittest discover -s tools/fake-portal -p 'test_*.py' || { echo "FAIL (python): fake-portal"; fail=1; }
 # Optional lint of the shipped shell (skip cleanly if shellcheck isn't installed).
 if command -v shellcheck >/dev/null 2>&1; then
   for f in device/rmweb device/rmweb-env.sh device/install.sh; do

@@ -11,9 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # run-tests.sh drives clang++ (C++ unit tests), bash (shell tests) and shellcheck
-      # (lint of the shipped device shell); install the compiler + linter explicitly.
+      # run-tests.sh drives clang++ (C++ unit tests), bash (shell tests), shellcheck
+      # (lint of the shipped device shell) and python3 + openssl (fake captive portal tests);
+      # install the compilers, linter and tools explicitly.
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y clang shellcheck
+        run: sudo apt-get update && sudo apt-get install -y clang shellcheck python3 openssl
       - name: Run host tests
         run: bash scripts/run-tests.sh
