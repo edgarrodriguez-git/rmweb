@@ -16,13 +16,22 @@
 //  - the default route is read from routeFile (/proc/net/route) at the start of the cycle. Without one the probes
 //    still run and combineCycle() reports NoNetwork;
 //  - the confirmation is sent only when combineCycle() would use it: a default route, at least one probe ProbeOk and
-//    none Captive. Otherwise it is not sent and counts as TlsConfirm::OtherFailure. Its URL must be https://. A
-//    certificate the TLS backend rejects is refused in `accept-certificate`, and its GTlsCertificateFlags are
+//    NO probe Captive (a captive verdict is conclusive, and without a route the result is NoNetwork anyway).
+//    Otherwise it is not sent and counts as TlsConfirm::OtherFailure;
+//  - the confirmation needs verified TLS, so a confirmUrl that is not https:// is never sent either: it counts as
+//    OtherFailure, i.e. Partial when the HTTP probes pass (a mistyped `confirm = http://…` override shows Partial);
+//  - a certificate the TLS backend rejects is refused in `accept-certificate`, and its GTlsCertificateFlags are
 //    kept, so it reports transportOk = false plus the flags (never transportOk = true with flags);
 //  - gAddress / aAddress: the peer address of the probe's connection (`network-event`, G_SOCKET_CLIENT_CONNECTED),
 //    empty when it never connected;
-//  - skewSec = G's Date header minus the device clock (time(nullptr)) when G's reply arrived; a server ahead of
-//    the device gives a positive value. dateKnown only when G answered with a Date that parses (IMF-fixdate).
+//  - clock skew comes ONLY from a 204 answer to G (design §5): dateKnown = true and skewSec = G's Date header minus
+//    the device clock (time(nullptr)) when that reply arrived — a server ahead of the device gives a positive value —
+//    only when G answered 204 with a Date that parses (IMF-fixdate). Every other case (a captive 302, a 200 or 511
+//    portal page, Limited, NoNetwork, an unparseable Date) gives dateKnown = false, skewSec = 0: a portal's own Date
+//    reflects the portal's clock and must not drive "Tablet clock looks wrong".
+//
+// libsoup: only API present in libsoup 3.0 is used (the device ships 3.6, the Mac 3.8). Host-tested against
+// Homebrew's 3.8; CI builds and runs the same test against the Ubuntu runner's libsoup 3.
 //
 // Threading and lifetime contract:
 //  - runCycle() is asynchronous: it returns at once and `done` runs later, from the ProbeRunner's GMainContext,
@@ -329,7 +338,7 @@ private:
         report.outcome = combineCycle(c->route, c->gv, c->av, confirm);
         report.gAddress = c->g.address;
         report.aAddress = c->a.address;
-        if (c->g.reply.transportOk) {
+        if (c->g.reply.transportOk && c->g.reply.status == 204) {   // only a real 204 from G carries the clock
             const long long serverEpoch = parseHttpDate(c->g.date);
             if (serverEpoch >= 0) {
                 report.dateKnown = true;

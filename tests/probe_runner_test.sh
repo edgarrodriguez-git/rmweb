@@ -243,10 +243,16 @@ if begin_case skew --variant plain-form --date-offset-s 3600; then
   check skew "skew="
 fi
 
+# A captive portal's own Date reflects the portal's clock: only a 204 from G may carry the clock check (design §5).
+if begin_case skew-captive --variant plain-form --date-offset-s 3600; then
+  run_cli --google "$G" --apple "$A" --confirm "$TLS_VALID" --ca "$CA" "${ROUTE[@]}"
+  check skew-captive "result=Captive " " skew=unknown"
+fi
+
 stop_portal
-if [ "$pass" = 11 ] && [ "$total" = 11 ]; then
-  echo "probe runner: 11/11 OK"
+if [ "$pass" = 12 ] && [ "$total" = 12 ]; then
+  echo "probe runner: 12/12 OK"
 else
-  echo "probe runner: FAIL ($pass/$total passed, 11 expected)"
+  echo "probe runner: FAIL ($pass/$total passed, 12 expected)"
   exit 1
 fi
