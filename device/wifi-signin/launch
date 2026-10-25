@@ -119,6 +119,9 @@ fi
 if systemctl is-active --quiet xovi-tripletap; then
   ws_state_add TRIPLETAP
   systemctl stop xovi-tripletap || ws_log "WARN: systemctl stop xovi-tripletap failed"
+  if systemctl is-active --quiet xovi-tripletap; then   # TRIPLETAP is recorded: cleanup's start is a no-op
+    refuse 12 "xovi-tripletap is still active after the stop: not stopping xochitl"
+  fi
   ws_log "xovi-tripletap stopped"
 fi
 

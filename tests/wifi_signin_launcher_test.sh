@@ -8,7 +8,8 @@
 #
 # The model:
 #   - systemctl keeps unit state in units/<unit>.state and units/<unit>.mainpid. `stop xochitl` makes it inactive
-#     and releases its panel fd; `start` makes it active (units/xochitl.startfail = how many starts fail first).
+#     and releases its panel fd; `start` makes it active (units/xochitl.startfail = how many starts fail first;
+#     units/<unit>.stopfail = every stop fails and leaves the unit as it was).
 #     It also writes a HAZARD line for each device hazard it can see: xochitl stopped less than 30 s after its
 #     start, or started while an app or WPE helper is alive, or over the EPD lock. Every case requires none.
 #   - /proc/<pid>/{stat,cmdline,fd/} and /proc/{uptime,mounts} are plain files; mount and umount edit
@@ -88,6 +89,7 @@ case $1 in
       *) echo 0 ;;
     esac ;;
   stop)
+    [ -e "$U/$2.stopfail" ] && exit 1
     if [ "$2" = xochitl ]; then
       pid=$(cat "$U/xochitl.mainpid" 2>/dev/null || echo 0)
       if [ -f "$WST/proc/$pid/stat" ]; then
@@ -603,6 +605,17 @@ wait_bg 20
 rc_is 0
 count_is "app run" 1; in_order "app run" "app TERM"; restored
 jnowant "no ready file"; jwant "[wifi-signin] exit 0 (SIGTERM drain)"; gone; common
+
+setup tripletap_still_active_after_stop_refuses
+# The stop fails and xovi-tripletap keeps running: a triple press would then restart xochitl over the app.
+: > "$T/units/xovi-tripletap.stopfail"
+run "$APP/launch"
+rc_is 12
+nowant "systemctl stop xochitl"; nowant "app run"; nowant_re "^mount "; count_is "sleep 1" 0
+in_order "wifi-signin 900000000000" "systemctl stop xovi-tripletap" "systemctl is-active --quiet xovi-tripletap" \
+  "wifi-signin" "systemctl start xovi-tripletap"
+jwant "xovi-tripletap is still active after the stop: not stopping xochitl"; jnowant "xovi-tripletap stopped"
+jwant "[wifi-signin] exit 12 (display busy)"; gone; common
 
 setup tripletap_inactive_left_alone
 echo inactive > "$T/units/xovi-tripletap.state"
