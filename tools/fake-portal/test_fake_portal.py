@@ -254,6 +254,18 @@ class SignInFlowTests(PortalCase):
         self.assertEqual(self.get(p, "/portal/get-token/accept?room=T0K3N9&name=Smith").status, 200)
         self.assertEqual(self.g(p).status, 204)
 
+    def test_login_password_has_a_password_input_and_a_post_grants(self):
+        # spec §2 acceptance test 6 submits a login and a password; rmweb's password path needs type="password"
+        p = self.start(variant="login-password")
+        body = self.get(p, "/portal/login-password/").body
+        self.assertIn(b'<input type="text" name="username"', body)
+        self.assertIn(b'<input type="password" name="password"', body)
+        self.assertIn(b'<form method="post" action="accept">', body)
+        self.assertEqual(self.g(p).status, 302)
+        r = self.post(p, "/portal/login-password/accept", {"username": "guest", "password": "s3cret"})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(self.g(p).status, 204)
+
     def test_terms_link_needs_agree_and_links_out(self):
         p = self.start(variant="terms-link")
         self.assertIn(b'name="agree"', self.get(p, "/portal/terms-link/").body)
@@ -298,6 +310,7 @@ class SignInFlowTests(PortalCase):
             "anchor-hash": [b'href="#"', b"addEventListener('click'", b"fetch('accept'", b"location='done'"],
             "div-role-button": [b'role="button"', b'tabindex="0"', b"addEventListener('click'", b"location='done'"],
             "tls-portal": [b'method="post"'],
+            "login-password": [b'method="post"', b'name="username"', b'type="password"'],
         }
         for variant, needles in markers.items():
             with self.subTest(variant=variant):
@@ -309,7 +322,8 @@ class SignInFlowTests(PortalCase):
     def test_every_variant_captures_and_grants(self):
         expected = {"status-511": 511, "status-403": 403}
         never = {"long-select", "non-ascii", "get-token", "window-open"}
-        self.assertEqual(len(fake_portal.VARIANTS), 20)
+        self.assertEqual(len(fake_portal.VARIANTS), 21)
+        self.assertIn("login-password", fake_portal.VARIANTS)
         for variant in fake_portal.VARIANTS:
             with self.subTest(variant=variant):
                 p = self.start(variant=variant)
@@ -324,6 +338,11 @@ class SignInFlowTests(PortalCase):
                 self.post(p, "/_control/grant")
                 self.assertEqual(self.g(p).status, 204)
                 self.assertIn(b"Connected", self.get(p, f"/portal/{variant}/").body)
+
+    def test_readme_lists_every_variant_in_order(self):
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            section = f.read().split("\n## Variants\n", 1)[1].split("\n## ", 1)[0]
+        self.assertEqual(re.findall(r"^\| `([a-z0-9-]+)` \|", section, re.M), list(fake_portal.VARIANTS))
 
 
 class RawAndControlTests(PortalCase):
@@ -727,6 +746,7 @@ class CliTests(unittest.TestCase):
                               "--cert-dir", tempfile.gettempdir()], capture_output=True, text=True, timeout=30)
         self.assertEqual(out.returncode, 2)
         self.assertIn("invalid choice", out.stderr)
+        self.assertIn("login-password", out.stderr, "the --variant choices list every variant")
 
 
 if __name__ == "__main__":

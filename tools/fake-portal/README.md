@@ -95,6 +95,7 @@ it.
 | `tls-portal` | 302 to `https://<host>:<tls_self>/portal/tls-portal/` (`tls_expired` with `--portal-cert expired`) | POST |
 | `tls-two-hosts` | 302 to the self-signed host A | host A only links to host B, `https://<san[1]>:<tls_self>/portal/tls-two-hosts/b` (`san[0]` when there is one `--san`); the form is on B |
 | `get-token` | 302 | GET `accept?room=<token>&name=Smith`, only when `room` equals `--token` (the form is pre-filled) |
+| `login-password` | 302 | POST `accept` from a `username` text input and a `type="password"` input (any POST grants); the credential form of the privacy test |
 | `long-select` | 302 | documented failure: 200 options; grants only through `/_control/grant` |
 | `non-ascii` | 302 | documented failure: surname `Müller`; grants only through `/_control/grant` |
 

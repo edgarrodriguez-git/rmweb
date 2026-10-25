@@ -11,7 +11,7 @@ VARIANTS = (
     "plain-form", "room-name", "js-checkbox", "fetch-dom", "delayed-grant", "meta-refresh",
     "cross-origin", "relative-location", "status-511", "status-403",
     "target-blank-post", "window-open", "anchor-hash", "div-role-button", "terms-link",
-    "tls-portal", "tls-two-hosts", "get-token", "long-select", "non-ascii",
+    "tls-portal", "tls-two-hosts", "get-token", "login-password", "long-select", "non-ascii",
 )
 
 _CSS = (
@@ -40,11 +40,13 @@ def _notice(text: str) -> str:
     return f'<p class="note">{escape(text)}</p>' if text else ""
 
 
+def _input(name, label, value, kind="text"):
+    return f'<label>{escape(label)}<br><input type="{kind}" name="{name}" value="{escape(value)}"></label>'
+
+
 def _form(fields, *, action="accept", method="post", button="Connect", extra="", attrs=""):
-    inputs = "".join(
-        f'<label>{escape(label)}<br><input type="text" name="{name}" value="{escape(value)}"></label>'
-        for name, label, value in fields
-    )
+    """`fields` holds (name, label, value) tuples, optionally with a fourth item: the input type (default text)."""
+    inputs = "".join(_input(*f) for f in fields)
     return (f'<form method="{method}" action="{action}"{attrs}>{inputs}{extra}'
             f'<button type="submit">{escape(button)}</button></form>')
 
@@ -147,6 +149,12 @@ def get_token(variant, *, token, notice="") -> str:
     return document("Sign in", _heading(variant) + _notice(notice) + _form(fields, method="get"))
 
 
+def login_password(variant, *, notice="") -> str:
+    """A username and a real password input: the credentials of spec §2 acceptance test 6."""
+    fields = [("username", "Username", ""), ("password", "Password", "", "password")]
+    return document("Sign in", _heading(variant) + _notice(notice) + _form(fields))
+
+
 def long_select(variant, *, notice="") -> str:
     options = "".join(f"<option>Country {i:03d}</option>" for i in range(1, 201))
     body = (
@@ -206,7 +214,7 @@ def login(variant: str, *, token: str = "", host_b: str = "", notice: str = "") 
     builders = {
         "room-name": room_name, "js-checkbox": js_checkbox, "fetch-dom": fetch_dom, "anchor-hash": anchor_hash,
         "div-role-button": div_role_button, "target-blank-post": target_blank_post, "window-open": window_open,
-        "terms-link": terms_link, "long-select": long_select, "non-ascii": non_ascii,
+        "terms-link": terms_link, "login-password": login_password, "long-select": long_select, "non-ascii": non_ascii,
     }
     if variant == "get-token":
         return get_token(variant, token=token, notice=notice)
