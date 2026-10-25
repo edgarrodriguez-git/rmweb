@@ -169,6 +169,7 @@ begin_case(){
     TLS_VALID="https://127.0.0.1:$((P + 2))/confirm"
     TLS_SELF="https://127.0.0.1:$((P + 3))/confirm"
     TLS_EXPIRED="https://127.0.0.1:$((P + 4))/confirm"
+    TLS_NOTYET="https://127.0.0.1:$((P + 5))/confirm"
     CLOSED="https://127.0.0.1:$((P + 6))/confirm"
     return 0
   fi
@@ -206,6 +207,30 @@ if begin_case limited --variant plain-form; then
   check limited "result=Limited "
 fi
 
+# A non-empty 2-byte body is Limited only through the declared Content-Length the runner reads (probe_runner.h).
+if begin_case limited-cl --variant plain-form; then
+  SHORT="http://127.0.0.1:$P/raw?status=200&body=ab&len=2"
+  run_cli --google "$SHORT" --apple "$SHORT" --confirm "$TLS_VALID" --ca "$CA" "${ROUTE[@]}"
+  check limited-cl "result=Limited "
+fi
+
+# G unreachable, A answers its success page: A alone is enough for Online, and G's address stays empty.
+if begin_case a-only --variant plain-form; then
+  grant
+  run_cli --google "http://127.0.0.1:$((P + 6))/generate_204" --apple "$A" --confirm "$TLS_VALID" --ca "$CA" \
+    "${ROUTE[@]}"
+  check a-only "result=Online " "g_addr= "
+fi
+
+# Any captive probe is conclusive (design §5): G captive, A granted.
+if begin_case mixed --variant plain-form; then
+  grant
+  PORTAL="http%3A%2F%2F127.0.0.1%3A$P%2Fportal%2Fplain-form%2F"
+  run_cli --google "http://127.0.0.1:$P/raw?status=302&location=$PORTAL" --apple "$A" --confirm "$TLS_VALID" \
+    --ca "$CA" "${ROUTE[@]}"
+  check mixed "result=Captive " "location=http://127.0.0.1:$P/portal/plain-form/ "
+fi
+
 if begin_case partial-self --variant plain-form; then
   grant
   run_cli --google "$G" --apple "$A" --confirm "$TLS_SELF" --ca "$CA" "${ROUTE[@]}"
@@ -216,6 +241,12 @@ if begin_case clock --variant plain-form; then
   grant
   run_cli --google "$G" --apple "$A" --confirm "$TLS_EXPIRED" --ca "$CA" "${ROUTE[@]}"
   check clock "result=OnlineClockWrong "
+fi
+
+if begin_case clock-notyet --variant plain-form; then
+  grant
+  run_cli --google "$G" --apple "$A" --confirm "$TLS_NOTYET" --ca "$CA" "${ROUTE[@]}"
+  check clock-notyet "result=OnlineClockWrong "
 fi
 
 if begin_case partial-closed --variant plain-form; then
@@ -230,6 +261,16 @@ if begin_case noroute --variant plain-form; then
   check noroute "result=NoNetwork "
 fi
 
+# Both probes refused at once: NoNetwork without waiting out the 5 s deadline. The limit leaves room for the one 1 s
+# SYN retry macOS can add when G and A hit the same closed port together (measured: ~1000 ms there, ~10 ms after).
+if begin_case refused --variant plain-form; then
+  run_cli --google "http://127.0.0.1:$((P + 6))/generate_204" --apple "http://127.0.0.1:$((P + 6))/hotspot-detect.html" \
+    --confirm "$TLS_VALID" --ca "$CA" "${ROUTE[@]}"
+  [ "$ELAPSED_MS" -lt 2500 ] || EXTRA_FAIL="took ${ELAPSED_MS} ms, limit 2500 ms"
+  check refused "result=NoNetwork "
+  echo "       (returned in ${ELAPSED_MS} ms)"
+fi
+
 if begin_case slow --variant plain-form; then
   SLOW="http://127.0.0.1:$P/raw?status=204&delay_s=7"
   run_cli --google "$SLOW" --apple "$SLOW" --confirm "$TLS_VALID" --ca "$CA" "${ROUTE[@]}"
@@ -241,7 +282,7 @@ fi
 if begin_case skew --variant plain-form --date-offset-s 3600; then
   grant
   run_cli --google "$G" --apple "$A" --confirm "$TLS_VALID" --ca "$CA" "${ROUTE[@]}"
-  SKEW="$(printf '%s\n' "$OUT" | sed -n 's/.* skew=\(-\{0,1\}[0-9][0-9]*\)$/\1/p')"
+  SKEW="$(printf '%s\n' "$OUT" | sed -n 's/.* skew=\(-\{0,1\}[0-9][0-9]*\)\( .*\)\{0,1\}$/\1/p')"   # more fields may follow
   if [ -z "$SKEW" ]; then EXTRA_FAIL="no numeric skew"
   elif [ "$SKEW" -lt 3595 ] || [ "$SKEW" -gt 3605 ]; then EXTRA_FAIL="skew $SKEW not within 3600±5"
   fi
@@ -255,9 +296,9 @@ if begin_case skew-captive --variant plain-form --date-offset-s 3600; then
 fi
 
 stop_portal
-if [ "$pass" = 12 ] && [ "$total" = 12 ]; then
-  echo "probe runner: 12/12 OK"
+if [ "$pass" = 17 ] && [ "$total" = 17 ]; then
+  echo "probe runner: 17/17 OK"
 else
-  echo "probe runner: FAIL ($pass/$total passed, 12 expected)"
+  echo "probe runner: FAIL ($pass/$total passed, 17 expected)"
   exit 1
 fi
