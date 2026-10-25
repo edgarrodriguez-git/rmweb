@@ -213,6 +213,9 @@ case ${APP_MODE:-online} in
   online) ready; exit 20 ;;
   cancel) ready; exit 21 ;;
   code:*) ready; exit "${APP_MODE#code:}" ;;
+  grabretry-code:*) # upstream logs this even when a later grab attempt succeeds
+    echo '[touch] EVIOCGRAB failed (attempt 1/5, device held elsewhere) - retrying' >&2
+    ready; exit "${APP_MODE#grabretry-code:}" ;;
   hang) ready; park ;;
   noready) park ;;
   noready-swtcon) echo 'Failed to initialize SWTCON' >&2; park ;;
@@ -519,6 +522,24 @@ ENVX=(APP_MODE=cancel)
 run "$APP/launch"
 rc_is 21
 count_is "app run" 1; nowant "usleep 3000000"; restored; jwant "[wifi-signin] exit 21 (cancelled)"; gone; common
+
+# R23: a deliberate outcome is never retried, even with a touch marker in stderr and well inside the window
+# (an already-open network exits 20 after about 2 s; a retry would cost an extra xochitl stop and start).
+for kv in "20:online" "0:SIGTERM drain" "21:cancelled" "22:idle timeout" "23:no network" "24:use network as is"; do
+  setup "deliberate_exit_never_retried ${kv%%:*}"
+  ENVX=(APP_MODE="grabretry-code:${kv%%:*}")
+  run "$APP/launch"
+  rc_is "${kv%%:*}"
+  count_is "app run" 1; nowant "usleep 3000000"; jnowant "retrying once"
+  jwant "[wifi-signin] exit ${kv%%:*} (${kv#*:})"; restored; gone; common
+done
+
+setup start_failure_with_marker_retried_once
+ENVX=(APP_MODE="grabretry-code:2")                # the same marker with a start-up failure code: retried, once
+run "$APP/launch"
+rc_is 2
+count_is "app run" 2; in_order "app run" "usleep 3000000" "app run"; restored
+jwant "retrying once"; jwant "[wifi-signin] exit 2 (start-up failure)"; gone; common
 
 setup noready_killed_after_timeout
 ENVX=(APP_MODE=noready HELPER=1)

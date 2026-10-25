@@ -252,9 +252,16 @@ quiet() { [ -z "$(ws_helper_pids)" ] && card_free; }
 LAUNCH_PID=$$
 start_refresher
 run_app
-# Start-up retry, once: an early failure (any non-zero code but 63) whose stderr shows a display-owner collision
-# or a touch grab failure. Not after the start-up watchdog's kill, which goes straight to cleanup.
-if [ "$APP_RC" -ne 0 ] && [ "$APP_RC" -ne 63 ] && [ "$APP_CS" -lt $(( WS_RETRY_WINDOW_S * 100 )) ] &&
+# Start-up retry, once: an early failure whose stderr shows a display-owner collision or a touch grab failure.
+# Never for a deliberate outcome (R23): the SIGTERM drain (0), a session verdict (20-24) or the GUI watchdog
+# (63). The app logs "[touch] EVIOCGRAB failed (attempt N/5 ...) - retrying" even when a later grab succeeds,
+# and an already-open network exits 20 after about 2 s: retrying those would cost a needless xochitl stop and
+# start. Not after the start-up watchdog's kill either, which goes straight to cleanup.
+retryable_code() {
+  case $1 in 0 | 20 | 21 | 22 | 23 | 24 | 63) return 1 ;; esac
+  return 0
+}
+if retryable_code "$APP_RC" && [ "$APP_CS" -lt $(( WS_RETRY_WINDOW_S * 100 )) ] &&
    [ ! -e "$WS_RUN/watchdog" ] &&
    grep -qF -e 'Failed to initialize SWTCON' -e '[touch] EVIOCGRAB failed' "$WS_RUN/stderr" 2>/dev/null; then
   ws_log "start-up failure after $(( APP_CS / 100 )) s with a display or touch marker in stderr: retrying once"
