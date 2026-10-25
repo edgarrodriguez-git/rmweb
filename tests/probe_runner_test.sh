@@ -2,14 +2,19 @@
 # Host integration test of the libsoup probe runner (engine/wpeqt/captive/probe_runner.h), driven through
 # tools/probe-cli against the fake captive portal (tools/fake-portal), one fresh portal per case.
 #
-# Needs libsoup-3.0 (skips cleanly without it), a GIO TLS backend (glib-networking) and an OpenSSL 3 binary for the
-# portal's TLS listeners. A missing TLS backend or a portal without TLS FAILS the test: CI must exercise TLS.
+# Needs libsoup-3.0 (skips cleanly without it, except under CI), a GIO TLS backend (glib-networking) and an OpenSSL 3
+# binary for the portal's TLS listeners. A missing TLS backend or a portal without TLS FAILS the test: CI must exercise
+# TLS. So does a missing libsoup when CI or GITHUB_ACTIONS is set: a skip there would read as a pass.
 # Portable to macOS's bash 3.2. PROBE_CLI_CXXFLAGS adds compiler flags (e.g. "-fsanitize=address -g").
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
 
 if ! pkg-config --exists libsoup-3.0 2>/dev/null; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "probe runner: FAIL — libsoup-3.0 not found by pkg-config, and under CI this test must run, not skip"
+    exit 1
+  fi
   echo "[tests] libsoup-3.0 not found — skipping probe runner test"
   exit 0
 fi

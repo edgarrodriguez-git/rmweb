@@ -18,8 +18,14 @@ for t in tests/*_test.sh; do
   name="$(basename "$t" .sh)"
   if bash "$t"; then :; else echo "FAIL (shell): $name"; fail=1; fi
 done
-# Fake captive portal (tools/fake-portal) — Python stdlib unittest; its TLS cases skip without an OpenSSL 3 binary.
-python3 -m unittest discover -s tools/fake-portal -p 'test_*.py' || { echo "FAIL (python): fake-portal"; fail=1; }
+# Fake captive portal (tools/fake-portal) — Python stdlib unittest; its TLS cases skip without an OpenSSL 3 binary,
+# except under CI, where a skip would read as a pass: WIFI_SIGNIN_REQUIRE_TLS makes the module fail instead.
+if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then export WIFI_SIGNIN_REQUIRE_TLS=1; fi
+if python3 -m unittest discover -s tools/fake-portal -p 'test_*.py' 2>&1 | tee build/fake-portal-tests.log; then :
+else echo "FAIL (python): fake-portal"; fail=1; fi
+ran="$(sed -n -E 's/^Ran ([0-9]+) tests? in .*/\1/p' build/fake-portal-tests.log | tail -n 1)"
+skipped="$(sed -n -E 's/^(OK|FAILED) \(.*skipped=([0-9]+).*/\2/p' build/fake-portal-tests.log | tail -n 1)"
+echo "[tests] fake-portal unittest: ran ${ran:-0} tests, ${skipped:-0} skipped"
 # Optional lint of the shipped shell (skip cleanly if shellcheck isn't installed).
 if command -v shellcheck >/dev/null 2>&1; then
   for f in device/rmweb device/rmweb-env.sh device/install.sh device/wifi-signin/lib.sh \

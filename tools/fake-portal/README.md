@@ -133,5 +133,7 @@ with FakePortal(variant="plain-form", base_port=0, cert_dir="build/certs") as po
 python3 -m unittest discover -s tools/fake-portal -p 'test_*.py' -v
 ```
 
-Part of `bash scripts/run-tests.sh`. TLS cases skip, with the reason, when no OpenSSL 3 binary is found.
+Part of `bash scripts/run-tests.sh`, which prints the skip count. TLS cases skip, with the reason, when no OpenSSL 3
+binary is found. With `WIFI_SIGNIN_REQUIRE_TLS=1`, which `run-tests.sh` exports when `CI` or `GITHUB_ACTIONS` is set,
+the module fails instead, so a CI run cannot pass without the TLS cases.
 The unit tests cannot run the JavaScript in the pages; check those by loading a variant in a browser.

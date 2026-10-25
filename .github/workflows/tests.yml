@@ -20,7 +20,8 @@ jobs:
       # (lint of the shipped device shell), python3 + openssl (fake captive portal tests) and
       # libsoup-3.0-dev + pkg-config + glib-networking (probe runner test; glib-networking is GIO's TLS backend,
       # which libsoup already pulls in on noble — listed so the dependency is explicit);
-      # install the compilers, linter and tools explicitly.
+      # install the compilers, linter and tools explicitly. Under CI a missing libsoup or OpenSSL 3 fails those
+      # tests instead of skipping them.
       - name: Install toolchain
         run: sudo apt-get update && sudo apt-get install -y clang shellcheck python3 openssl libsoup-3.0-dev glib-networking pkg-config
       - name: Run host tests

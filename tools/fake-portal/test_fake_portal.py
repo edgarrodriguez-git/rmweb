@@ -2,7 +2,8 @@
 
 Run:  python3 -m unittest discover -s tools/fake-portal -p 'test_*.py' -v
 
-Nothing here follows redirects. TLS cases skip when no OpenSSL 3 binary is found.
+Nothing here follows redirects. TLS cases skip when no OpenSSL 3 binary is found, unless WIFI_SIGNIN_REQUIRE_TLS
+is set (scripts/run-tests.sh sets it under CI): then the whole module fails.
 """
 import contextlib
 import email.utils
@@ -38,12 +39,16 @@ try:
 except certs.OpenSSLUnavailable as exc:
     TLS_SKIP_REASON = str(exc)
 needs_tls = unittest.skipIf(TLS_SKIP_REASON is not None, f"TLS tests need OpenSSL 3: {TLS_SKIP_REASON}")
+# Set by run-tests.sh under CI: there a TLS skip would read as a pass, so the module fails instead.
+REQUIRE_TLS = os.environ.get("WIFI_SIGNIN_REQUIRE_TLS", "") not in ("", "0")
 
 CERT_DIR = ""  # shared by every test so the CA is generated once
 
 
 def setUpModule():
     global CERT_DIR
+    if REQUIRE_TLS and TLS_SKIP_REASON is not None:
+        raise RuntimeError(f"WIFI_SIGNIN_REQUIRE_TLS is set, so the TLS tests must run, not skip: {TLS_SKIP_REASON}")
     CERT_DIR = tempfile.mkdtemp(prefix="fake-portal-test-")
 
 
@@ -655,6 +660,35 @@ class FindOpenSSLTests(unittest.TestCase):
             return self.only_absolute_paths(name)
         with mock.patch.dict(os.environ, {"OPENSSL": libre}), mock.patch.object(certs.shutil, "which", side_effect=which):
             self.assertEqual(certs.find_openssl(use_cache=False), good)
+
+
+class RequireTlsTests(unittest.TestCase):
+    """WIFI_SIGNIN_REQUIRE_TLS (run-tests.sh sets it under CI) turns the missing-OpenSSL-3 skip into a failure."""
+
+    def run_cert_tests(self, require):
+        tmp = tempfile.mkdtemp(prefix="fake-openssl-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        libre = os.path.join(tmp, "openssl")
+        with open(libre, "w") as f:
+            f.write('#!/bin/sh\necho "LibreSSL 3.3.6"\n')
+        os.chmod(libre, 0o755)
+        env = dict(os.environ, OPENSSL=libre, PATH=tmp)  # no brew and no other openssl on PATH either
+        env.pop("WIFI_SIGNIN_REQUIRE_TLS", None)
+        if require:
+            env["WIFI_SIGNIN_REQUIRE_TLS"] = "1"
+        return subprocess.run([sys.executable, "-m", "unittest", "test_fake_portal.CertTests"], cwd=HERE, env=env,
+                              capture_output=True, text=True, timeout=120)
+
+    def test_without_openssl_3_the_tls_cases_skip(self):
+        out = self.run_cert_tests(require=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(out.stderr, r"OK \(skipped=\d+\)")
+
+    def test_without_openssl_3_the_tls_cases_fail_when_required(self):
+        out = self.run_cert_tests(require=True)
+        self.assertNotEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("skipped=", out.stderr)
+        self.assertIn("WIFI_SIGNIN_REQUIRE_TLS", out.stderr)
 
 
 class CliTests(unittest.TestCase):
