@@ -24,9 +24,10 @@
 : "${WS_APP_TERM_WAIT_S:=3}"     # cleanup: how long the app gets to drain after TERM
 : "${WS_HELPER_WAIT_S:=10}"      # cleanup and retry: how long the app and WPE helpers get to disappear
 : "${WS_STOP_DEADLINE_S:=20}"    # cleanup step 2 as a whole ends this long after it starts, whatever the app does
+: "${WS_SYSTEMD_RUN:=systemd-run}" # what appload-entry.sh runs (the host tests point it at a missing path)
 export WS_RUN WS_APP WS_RUNTIME WS_USERDIR WS_SYSPOWER WS_PROC WS_EPD_LOCK WS_CARD WS_LIBEXEC WS_GUARD_S \
   WS_GUARD_MAX_S WS_CARD_WAIT_S WS_READY_TIMEOUT_S WS_RETRY_WINDOW_S WS_REFRESH_S WS_APP_TERM_WAIT_S \
-  WS_HELPER_WAIT_S WS_STOP_DEADLINE_S
+  WS_HELPER_WAIT_S WS_STOP_DEADLINE_S WS_SYSTEMD_RUN
 
 # Under systemd the environment is minimal: make sure the standard directories are searched. Appended, so a
 # caller's own PATH (the host tests' stub directory) keeps priority.

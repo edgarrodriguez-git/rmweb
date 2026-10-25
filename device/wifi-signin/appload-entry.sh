@@ -17,13 +17,14 @@ case $state in
 esac
 
 # 2. No direct-exec fallback: inside xochitl's cgroup, stopping xochitl would kill the launcher itself.
-if ! command -v systemd-run >/dev/null 2>&1; then
+#    ($WS_SYSTEMD_RUN is systemd-run; the host tests point it at a missing path, never at the host's own.)
+if ! command -v "$WS_SYSTEMD_RUN" >/dev/null 2>&1; then
   ws_log "systemd-run is missing: not starting (xochitl untouched)"
   ws_log "exit 13 ($(ws_exit_meaning 13))"
   exit 13
 fi
 
 # 3.
-exec systemd-run --unit=wifi-signin --collect --quiet \
+exec "$WS_SYSTEMD_RUN" --unit=wifi-signin --collect --quiet \
   -p "ExecStopPost=-$WS_APP/cleanup post" -p TimeoutStopSec=30 -p MemoryAccounting=yes \
   "$WS_APP/launch"

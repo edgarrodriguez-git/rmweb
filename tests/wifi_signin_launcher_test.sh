@@ -2,7 +2,9 @@
 # Host tests for the wifi-signin takeover launcher: device/wifi-signin/{lib.sh,appload-entry.sh,launch,cleanup}
 # (docs/wifi-signin/design.md section 6). Nothing real is touched: systemctl, systemd-run, mount, umount, sleep
 # and usleep are stubs on PATH that append what they were asked to stub.log, and /proc, /sys/power, /run, /tmp,
-# /dev/dri and /usr/libexec are directories under a temp dir whose path has a space in it on purpose.
+# /dev/dri and /usr/libexec are directories under a temp dir whose path has a space in it on purpose. The
+# side-effecting stubs are never removed: lib.sh appends the standard directories to PATH, so a missing stub would
+# run the host's real binary (a missing systemd-run is modelled with the WS_SYSTEMD_RUN seam instead).
 #
 # The model:
 #   - systemctl keeps unit state in units/<unit>.state and units/<unit>.mainpid. `stop xochitl` makes it inactive
@@ -310,6 +312,10 @@ between_count(){ # between_count START END LINE: how many LINEs come after the f
 }
 common(){ # what every case requires
   if grep -q HAZARD "$STUBLOG"; then fail "hazard: $(grep HAZARD "$STUBLOG" | head -n 3 | tr '\n' ';')"; fi
+  local s
+  for s in systemctl systemd-run mount umount; do   # lib.sh appends /usr/bin etc.: a missing stub runs the host's own
+    [ -x "$T/stubs/$s" ] || fail "the $s stub is gone: the host's real $s was reachable"
+  done
   if grep -qv '^\[wifi-signin\] ' "$JOURNAL"; then fail "journal line without the [wifi-signin] prefix: $(grep -v '^\[wifi-signin\] ' "$JOURNAL" | head -n 2 | tr '\n' ';')"; fi
 }
 restored(){ # the end of every session that stopped xochitl
@@ -629,8 +635,9 @@ count_is "systemd-run [--unit=wifi-signin] [--collect] [--quiet] [-p] [ExecStopP
 nowant_re "xochitl"; common
 
 setup entry_no_systemd_run_exits_13
-rm -f "$T/stubs/systemd-run"
-ARGS=("${ARGS[@]}" PATH="$T/stubs:/usr/bin:/bin")
+# R30: "missing" comes from the WS_SYSTEMD_RUN seam alone. The stub stays on PATH (and lib.sh appends the standard
+# directories anyway), so a host's real /usr/bin/systemd-run can never run here.
+ENVX=(WS_SYSTEMD_RUN=/nonexistent/systemd-run)
 run "$APP/appload-entry.sh"
 rc_is 13
 nowant_re "^systemd-run"; nowant_re "xochitl"; jwant "[wifi-signin] exit 13 (systemd-run missing)"; common
