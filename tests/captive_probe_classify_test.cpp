@@ -64,6 +64,27 @@ int main() {
         auto o = classifyProbe(ProbeKind::Google204, G, {true,204,"",0,""});
         CHECK(o.location.empty() && o.probeUrl == G);
     }
+    // classifyProbe: a Location whose resolved scheme is not http or https counts as absent (R28) — still Captive, and
+    // the view stays on the probe URL
+    for (const char* loc : {"javascript:alert(1)", "data:text/html,<b>x</b>", "file:///etc/passwd", "rmweb:tls-continue",
+                            "rmweb:settings", "JavaScript:alert(1)", "ftp://h/x", "about:blank", "httpx://h/x"}) {
+        auto p = classifyProbe(ProbeKind::Google204, G, {true,302,"",0,loc});
+        CHECK(p.cls == ProbeClass::Captive && p.location.empty() && p.probeUrl == G);
+        auto q = classifyProbe(ProbeKind::AppleSuccess, A, {true,200,"<html>portal</html>",19,loc});
+        CHECK(q.cls == ProbeClass::Captive && q.location.empty());
+        auto c = combineCycle(true, p, ProbeVerdict{ProbeClass::ProbeOk,A,""}, TlsConfirm::Ok204);
+        CHECK(c.result == CycleResult::Captive && c.viewUrl == G && c.locationUrl.empty());
+    }
+    {
+        auto s = classifyProbe(ProbeKind::Google204, G, {true,302,"",0,"//evil.example/p"});   // scheme-relative: inherits http
+        CHECK(s.cls == ProbeClass::Captive && s.location == "http://evil.example/p");
+        auto u = classifyProbe(ProbeKind::Google204, G, {true,302,"",0,"HTTPS://Portal/x"});   // scheme case is ignored
+        CHECK(u.cls == ProbeClass::Captive && u.location == "HTTPS://Portal/x");
+        auto h = classifyProbe(ProbeKind::Google204, G, {true,302,"",0,"Http://portal.example/login"});
+        CHECK(h.location == "Http://portal.example/login");
+        auto r = classifyProbe(ProbeKind::Google204, "https://h/generate_204", {true,302,"",0,"/login"});
+        CHECK(r.location == "https://h/login");                                                // https base kept
+    }
     // classifyProbe: Limited rule boundaries (status 200 or 400..599, empty body or 0 <= contentLength <= 4)
     CHECK(classifyProbe(ProbeKind::Google204, G, {true,399,"",0,""}).cls == ProbeClass::Captive);
     CHECK(classifyProbe(ProbeKind::Google204, G, {true,400,"",0,""}).cls == ProbeClass::Limited);

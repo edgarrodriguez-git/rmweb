@@ -6,6 +6,7 @@
 #pragma once
 #include <cstddef>
 #include <string>
+#include <utility>
 
 namespace rmweb::captive {
 
@@ -16,7 +17,8 @@ enum class ProbeClass { ProbeOk, Limited, Captive, NoNetwork };
 
 // What the probe runner saw. transportOk=false means no HTTP response at all (DNS/connect/timeout failure).
 struct HttpReply { bool transportOk = false; int status = 0; std::string body; long long contentLength = -1; std::string location; };
-// location: the reply's Location header resolved against probeUrl, "" if the reply had none.
+// location: the reply's Location header resolved against probeUrl; "" if the reply had none, or if it resolved to
+// anything but an http or https URL.
 struct ProbeVerdict { ProbeClass cls = ProbeClass::NoNetwork; std::string probeUrl; std::string location; };
 
 namespace detail {
@@ -86,6 +88,12 @@ inline std::string removeDotSegments(std::string in) {
     return out;
 }
 
+// Is this URL scheme http or https, in any (ASCII) letter case?
+inline bool isWebScheme(std::string scheme) {
+    for (char& c : scheme) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return scheme == "http" || scheme == "https";
+}
+
 // RFC 3986 §5.2.3 merge.
 inline std::string mergePaths(const UrlRef& base, const std::string& refPath) {
     if (base.hasAuthority && base.path.empty()) return "/" + refPath;
@@ -141,12 +149,18 @@ inline std::string resolveUrl(const std::string& base, const std::string& ref) {
 //  - Limited:   status 200 or 400..599 with an empty body or a declared length of 0..4 bytes — the network answers
 //               but with an (almost) empty page, i.e. no portal to sign in to, just no internet.
 //  - Captive:   anything else (typically a redirect, or a real page where a 204 / the Apple body was expected).
-// `location` is the reply's Location header (if non-empty), resolved against probeUrl.
+// `location` is the reply's Location header (if non-empty), resolved against probeUrl, and kept only when the result is
+// an http or https URL (scheme in any letter case; "//host/p" inherits the probe's http). Any other scheme —
+// javascript:, data:, file:, rmweb:, … — counts as no Location (R28): the view then stays on the probe URL (spec §5
+// "otherwise the probe URL itself"), and a portal-chosen URL of another scheme never reaches navigation.
 inline ProbeVerdict classifyProbe(ProbeKind kind, const std::string& probeUrl, const HttpReply& r) {
     ProbeVerdict v;
     v.probeUrl = probeUrl;
     if (!r.transportOk) { v.cls = ProbeClass::NoNetwork; return v; }
-    if (!r.location.empty()) v.location = resolveUrl(probeUrl, r.location);
+    if (!r.location.empty()) {
+        std::string resolved = resolveUrl(probeUrl, r.location);
+        if (detail::isWebScheme(detail::splitUrl(resolved).scheme)) v.location = std::move(resolved);
+    }
 
     std::string trimmed = r.body;
     while (!trimmed.empty() && detail::isSpace(trimmed.back())) trimmed.pop_back();
