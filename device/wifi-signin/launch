@@ -125,7 +125,14 @@ fi
 # --- Step 4: 30 s guard on the boot-time clock (stopping a just-started xochitl has crashed it) ---------------
 xo_state() { systemctl show -p ActiveState --value xochitl 2>/dev/null; }
 xo_pid() { systemctl show -p MainPID --value xochitl 2>/dev/null; }
+# The cap (WS_GUARD_MAX_S) is a deadline on the boot clock, so slow systemctl calls count too; the pass count
+# (each pass sleeps 1 s) is only a backstop for an unreadable clock.
 passes=0; last=; age=
+if guard_end=$(ws_uptime_cs); then guard_end=$(( guard_end + WS_GUARD_MAX_S * 100 )); else guard_end=; fi
+past_guard_cap() {
+  [ "$passes" -ge $(( WS_GUARD_MAX_S * 2 )) ] && return 0
+  [ -n "$guard_end" ] && clock_cs=$(ws_uptime_cs) && [ "$clock_cs" -ge "$guard_end" ]
+}
 while :; do
   st=$(xo_state); pid=$(xo_pid); now="$st $pid"
   if [ -n "$last" ] && [ "$now" != "$last" ]; then
@@ -144,7 +151,7 @@ while :; do
     activating | deactivating | reloading | refreshing) ;;   # starting or stopping: wait for it to settle
     *) break ;;                                             # inactive, failed, ...: step 5 refuses
   esac
-  if [ "$passes" -ge "$WS_GUARD_MAX_S" ]; then
+  if past_guard_cap; then
     refuse 12 "xochitl did not settle within ${WS_GUARD_MAX_S} s ($now): not stopping it"
   fi
   [ "$passes" = 0 ] && ws_log "waiting until xochitl has run ${WS_GUARD_S} s ($st, age ${age:-unknown} s)"

@@ -23,9 +23,10 @@
 : "${WS_REFRESH_S:=60}"          # the 15 min wakelock is rewritten this often while the app runs
 : "${WS_APP_TERM_WAIT_S:=3}"     # cleanup: how long the app gets to drain after TERM
 : "${WS_HELPER_WAIT_S:=10}"      # cleanup and retry: how long the app and WPE helpers get to disappear
+: "${WS_STOP_DEADLINE_S:=20}"    # cleanup step 2 as a whole ends this long after it starts, whatever the app does
 export WS_RUN WS_APP WS_RUNTIME WS_USERDIR WS_SYSPOWER WS_PROC WS_EPD_LOCK WS_CARD WS_LIBEXEC WS_GUARD_S \
   WS_GUARD_MAX_S WS_CARD_WAIT_S WS_READY_TIMEOUT_S WS_RETRY_WINDOW_S WS_REFRESH_S WS_APP_TERM_WAIT_S \
-  WS_HELPER_WAIT_S
+  WS_HELPER_WAIT_S WS_STOP_DEADLINE_S
 
 # Under systemd the environment is minimal: make sure the standard directories are searched. Appended, so a
 # caller's own PATH (the host tests' stub directory) keeps priority.
@@ -40,26 +41,35 @@ ws_log() { printf '[wifi-signin] %s\n' "$*"; }
 ws_state_add() { printf '%s\n' "$1" >> "$WS_RUN/state"; }
 ws_state_has() { grep -qxF -- "$1" "$WS_RUN/state" 2>/dev/null; }
 
-# ws_settle MICROSECONDS: usleep, or sleep rounded up to whole seconds where there is no usleep.
+# ws_settle MICROSECONDS: usleep; where there is none, a fractional sleep (upstream device/rmweb relies on
+# `sleep 0.5` on this tablet); only if that fails too, sleep rounded up to whole seconds.
 ws_settle() {
   if command -v usleep >/dev/null 2>&1; then
     usleep "$1"
-  else
-    sleep $(( ($1 + 999999) / 1000000 ))
+    return
   fi
+  _ws_us=$(( $1 % 1000000 + 1000000 ))           # 1000000-1999999: drop the leading 1 for six digits
+  sleep "$(( $1 / 1000000 )).${_ws_us#1}" 2>/dev/null || sleep $(( ($1 + 999999) / 1000000 ))
 }
 
-# ws_wait_for SECONDS FUNCTION: polls FUNCTION every 0.2 s until it succeeds; returns 1 if it still fails after
-# SECONDS. Bounded by the poll count, so it ends even if the clock cannot be read.
-ws_wait_for() {
-  _ws_left=$(( $1 * 5 ))
+# ws_wait_cs CENTISECONDS FUNCTION: polls FUNCTION every 0.2 s until it succeeds. Returns 1 once the boot clock
+# is past the deadline (its value at the start + CENTISECONDS) with FUNCTION still failing, however long each
+# check or settle takes. FUNCTION is tried at least once, and again after the settle that crosses the deadline.
+# A pass count (one pass per 5 cs, i.e. 4x the nominal polls) is only a backstop for an unreadable clock.
+ws_wait_cs() {
+  _ws_left=$(( $1 / 5 ))
+  if _ws_end=$(ws_uptime_cs); then _ws_end=$(( _ws_end + $1 )); else _ws_end=; fi
   while ! "$2"; do
     [ "$_ws_left" -gt 0 ] || return 1
+    if [ -n "$_ws_end" ] && _ws_now=$(ws_uptime_cs) && [ "$_ws_now" -ge "$_ws_end" ]; then return 1; fi
     _ws_left=$(( _ws_left - 1 ))
     ws_settle 200000
   done
   return 0
 }
+
+# ws_wait_for SECONDS FUNCTION: ws_wait_cs in whole seconds.
+ws_wait_for() { ws_wait_cs $(( $1 * 100 )) "$2"; }
 
 # ws_uptime_cs: the boot-time clock (first field of $WS_PROC/uptime, which counts suspended time too) in
 # centiseconds.
@@ -68,6 +78,7 @@ ws_uptime_cs() {
   _ws_int=${_ws_up%%.*}
   case $_ws_up in *.*) _ws_frac=${_ws_up#*.}00 ;; *) _ws_frac=00 ;; esac
   _ws_frac=${_ws_frac%"${_ws_frac#??}"}          # first two digits; "1$x - 100" keeps 08 from reading as octal
+  case $_ws_int$_ws_frac in '' | *[!0-9]*) return 1 ;; esac
   echo $(( _ws_int * 100 + 1$_ws_frac - 100 ))
 }
 
