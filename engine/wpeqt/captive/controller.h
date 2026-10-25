@@ -34,12 +34,17 @@
 //    `after` watchdog fires at the deadline in every phase (re-armed when activity moved it); ticks and cycle
 //    completions check the deadline as well.
 //  - Hosts compare as host[:port], case-insensitively, with userinfo and a default port dropped (ctlHostKey); the
-//    probe hosts are those of cfg.gUrl and cfg.aUrl. A navigation decision to a probe host after the view has been on
-//    any other host is a ProbeHostNav (immediate cycle); every other decision, and every load end, is a PageEvent.
-//    The hosts the view has been on are learned from decisions and load ends while the portal is shown.
-//  - Location fallback, once per captive outcome: a load end on exactly that outcome's viewUrl (fragment ignored, see
-//    ctlUrlKey) navigates to its locationUrl when it has one — the view stayed on the probe URL with an empty page or
-//    an error. A load end on another page of the probe host does not: same-origin portals serve their pages there.
+//    probe hosts are those of cfg.gUrl and cfg.aUrl. The view's CURRENT host comes from load ends only (WebKit's load
+//    events are main-frame only; navigation decisions include sub-frames). A navigation decision is a ProbeHostNav
+//    (immediate cycle, no gap) only when it is a RETURN: it targets a probe host, the current host is a non-empty
+//    non-probe host, and no ProbeHostNav has been given since the last load end. Every other decision, and every load
+//    end, is a PageEvent — so a stream of decisions to a probe host gets one immediate cycle, then the 3 s gap.
+//  - Location fallback: armed only by the one navigate(viewUrl) that shows the portal (a start-up or Retry Captive
+//    result, and only when that outcome had a locationUrl), consumed by the FIRST load end after it. When that load end is exactly viewUrl (fragment ignored,
+//    see ctlUrlKey) — the view stayed on the probe URL with an empty page or an error — it navigates to locationUrl;
+//    any other first load end just disarms it, so a later return to the probe URL (a portal sending the tablet back
+//    to G after the login) never triggers it. Any non-Captive cycle result while shown also disarms it; a later
+//    Captive result neither re-arms nor disarms it.
 //
 // Threading and lifetime: call every member on one thread, the one `after` callbacks and runCycle's `done` run on (the
 // engine thread). Every hook must be set. Callbacks handed to `after` and runCycle hold only a liveness token, so they
@@ -188,31 +193,35 @@ public:
         startCycle(/*fromScheduler=*/false, now);
     }
 
-    // Every navigation decision (WebKit reports main and sub frames alike): PageEvent, or ProbeHostNav when it targets
-    // a probe host after the view has been on another host.
+    // Every navigation decision (WebKit reports main and sub frames alike): a ProbeHostNav when it returns from a
+    // non-probe host to a probe host (at most one per load end), otherwise a PageEvent. Decisions never change the
+    // view's current host.
     void onNavigationDecision(const std::string& uri) {
         if (!portalLive()) return;
         const int64_t now = hooks_.nowMs();
-        const std::string host = detail::ctlHostKey(uri);
-        if (isProbeHost(host) && leftProbeHost_) {
+        const bool isReturn = isProbeHost(detail::ctlHostKey(uri)) && !currentHost_.empty() &&
+                              !isProbeHost(currentHost_) && !hostNavGiven_;
+        if (isReturn) {
             sched_.trigger(Trigger::ProbeHostNav, now);
+            hostNavGiven_ = true;
             hostNavPending_ = true;
         } else {
             sched_.trigger(Trigger::PageEvent, now);
         }
-        noteHost(host);
         pump(now);
     }
 
-    // A load finished, failed, was cancelled or interrupted: PageEvent, plus the Location fallback.
+    // A main-frame load finished, failed, was cancelled or interrupted: sets the current host, PageEvent, and consumes
+    // the Location fallback if it is still armed.
     void onLoadEnd(const std::string& uri) {
         if (!portalLive()) return;
         const int64_t now = hooks_.nowMs();
-        noteHost(detail::ctlHostKey(uri));
+        currentHost_ = detail::ctlHostKey(uri);
+        hostNavGiven_ = false;
         sched_.trigger(Trigger::PageEvent, now);
-        if (fallbackArmed_ && detail::ctlUrlKey(uri) == fallbackViewKey_) {
-            fallbackArmed_ = false;
-            hooks_.navigate(fallbackLocation_);
+        if (fallbackArmed_) {
+            fallbackArmed_ = false;                             // only the first load end after navigate(viewUrl)
+            if (detail::ctlUrlKey(uri) == fallbackViewKey_) hooks_.navigate(fallbackLocation_);
         }
         pump(now);
     }
@@ -260,7 +269,6 @@ private:
     bool portalLive() const { return shown_ && exit_ == ExitState::None; }
     bool idleExpired(int64_t now) const { return now - lastActivity_ >= idleMs_; }
     bool isProbeHost(const std::string& host) const { return !host.empty() && (host == gHost_ || host == aHost_); }
-    void noteHost(const std::string& host) { if (!host.empty() && !isProbeHost(host)) leftProbeHost_ = true; }
     bool startupScreenOffers(Button b) const { return !shown_ && screenKnown_ && detail::ctlScreenOffers(screen_, b); }
 
     void startCycle(bool fromScheduler, int64_t now) {
@@ -298,10 +306,11 @@ private:
     }
 
     void onShownResult(const CycleOutcome& o) {
+        if (o.result != CycleResult::Captive) fallbackArmed_ = false;
         switch (o.result) {
             case CycleResult::Online:           setScreen(Screen::Connected);           exitAfter(kExitOnline, kConnectedMs); break;
             case CycleResult::OnlineClockWrong: setScreen(Screen::ConnectedClockWrong); exitAfter(kExitOnline, kConnectedMs); break;
-            case CycleResult::Captive:          armFallback(o); break;   // keeps the page: never navigates again
+            case CycleResult::Captive:          break;                   // keeps the page: never navigates again
             case CycleResult::Partial:                                   // the status line says it
             case CycleResult::Limited:
             case CycleResult::NoNetwork:        break;                   // keeps the page (rmweb's error page has Reload)
@@ -313,18 +322,14 @@ private:
         screen_ = Screen::None;
         screenKnown_ = true;
         hooks_.showScreen(Screen::None);
-        armFallback(o);
+        fallbackViewKey_ = detail::ctlUrlKey(o.viewUrl);       // the only place the fallback is armed
+        fallbackLocation_ = o.locationUrl;
+        fallbackArmed_ = !o.locationUrl.empty();
         hooks_.navigate(o.viewUrl);
         if (exit_ != ExitState::None) return;
         sched_.arm(now);
         hostNavPending_ = false;
         scheduleTick();
-    }
-
-    void armFallback(const CycleOutcome& o) {
-        fallbackViewKey_ = detail::ctlUrlKey(o.viewUrl);
-        fallbackLocation_ = o.locationUrl;
-        fallbackArmed_ = !o.locationUrl.empty();
     }
 
     void setScreen(Screen s) {
@@ -431,8 +436,9 @@ private:
     int64_t directGapUntil_ = std::numeric_limits<int64_t>::min();   // start-up / Retry cycle start + 3 s
     bool hostNavPending_ = false;                    // a ProbeHostNav waits: it may start inside that gap
 
-    bool leftProbeHost_ = false;                     // the view has been on a non-probe host
-    bool fallbackArmed_ = false;                     // the latest captive outcome's Location fallback is unused
+    std::string currentHost_;                        // ctlHostKey of the last load end's URI ("" before any)
+    bool hostNavGiven_ = false;                      // a ProbeHostNav was given since the last load end
+    bool fallbackArmed_ = false;                     // the start-up navigation's first load end is still to come
     std::string fallbackViewKey_, fallbackLocation_;
 };
 

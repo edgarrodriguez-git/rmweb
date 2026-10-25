@@ -301,10 +301,10 @@ static void never_views_probe_ok_url() {
         h.completeAt(100, r);
         CHECK(h.navs == std::vector<std::string>{kA});
         h.advanceTo(500);
-        h.ctl->onLoadEnd(kG);                  // a load end on the probe-ok URL is no reason to go anywhere
-        CHECK(h.navs == std::vector<std::string>{kA});
         h.ctl->onNavigationDecision(kA);
         h.ctl->onLoadEnd(kA);                  // the view stayed on A: fall back to A's Location
+        CHECK(h.navs == (std::vector<std::string>{kA, kPortal}));
+        h.ctl->onLoadEnd(kG);                  // a load end on the probe-ok URL is no reason to go anywhere
         CHECK(h.navs == (std::vector<std::string>{kA, kPortal}));
         for (const std::string& u : h.navs) CHECK(u != kG);
     }
@@ -331,7 +331,7 @@ static void location_fallback_when_view_stays_on_probe_host() {
     h.ctl->onNavigationDecision(kG);
     h.ctl->onLoadEnd(kG);                      // the load ended on the probe URL itself (empty body or an error)
     CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
-    h.ctl->onLoadEnd(kG);                      // once per captive outcome
+    h.ctl->onLoadEnd(kG);                      // only the first load end after navigate(viewUrl) may fall back
     CHECK(h.navs.size() == 2);
     CHECK(h.exits.empty());
 }
@@ -715,10 +715,10 @@ static void first_reprobe_keeps_gap_after_startup_cycle() {
         Harness h;
         showPortal(h, kG, kPortal);
         h.advanceTo(200);
-        h.ctl->onNavigationDecision(kPortal);
+        h.ctl->onLoadEnd(kPortal);             // the view is on the portal's own host
         CHECK(h.cycleStarts.size() == 1);
         h.advanceTo(300);
-        h.ctl->onNavigationDecision(kA);       // a probe host after the portal's host
+        h.ctl->onNavigationDecision(kA);       // a return to a probe host
         CHECK(h.cycleStarts.size() == 2);
         CHECK(h.cycleStarts.back() == 300);
     }
@@ -845,28 +845,31 @@ static void nothing_runs_after_exit() {
     CHECK(h.timers.empty());
 }
 
-// Ruling 4: probe hosts are host[:port] of gUrl and aUrl, compared case-insensitively.
+// Rulings 4 / R20: probe hosts are host[:port] of gUrl and aUrl, compared case-insensitively.
 static void probe_hosts_compare_host_and_port_case_insensitively() {
     const CaptiveConfig cfg = parseCaptiveConfig("probe_google = http://127.0.0.1:18080/generate_204\n"
                                                  "probe_apple = http://Captive.Example.test:18081/hotspot-detect.html\n");
     Harness h(cfg);
     showPortal(h, cfg.gUrl, "");
     h.advanceTo(4000);
-    h.ctl->onNavigationDecision("http://127.0.0.1:18082/portal");   // same address, other port: NOT a probe host
+    h.ctl->onLoadEnd("http://127.0.0.1:18082/portal");               // same address, other port: NOT a probe host
     CHECK(h.cycleStarts.size() == 2);
     h.completeAt(4100, captive(cfg.gUrl));
     h.advanceTo(5000);
     h.ctl->onNavigationDecision("http://CAPTIVE.example.TEST:18081/x");   // probe host A in other letter case
     CHECK(h.cycleStarts.size() == 3);
-    CHECK(h.cycleStarts.back() == 5000);       // ProbeHostNav: immediate, inside the 3 s gap
+    CHECK(h.cycleStarts.back() == 5000);       // a return: ProbeHostNav, immediate, inside the 3 s gap
     h.completeAt(5100, captive(cfg.gUrl));
     h.advanceTo(6000);
-    h.ctl->onNavigationDecision("http://127.0.0.1:18080/");          // probe host G
+    h.ctl->onNavigationDecision("http://127.0.0.1:18080/");          // probe host G, but no load end since the
+    CHECK(h.cycleStarts.size() == 3);                                 // last ProbeHostNav: a plain PageEvent
+    h.advanceTo(8100);
     CHECK(h.cycleStarts.size() == 4);
-    CHECK(h.cycleStarts.back() == 6000);
+    CHECK(h.cycleStarts.back() == 8100);       // deferred to the gap's end (8000), started on the next tick
 }
 
-// Ruling 4: a navigation to a probe host is a ProbeHostNav only after the view has been on another host.
+// R20: a navigation to a probe host is a ProbeHostNav only when the view's current host (from load ends, never from
+// decisions — those include sub-frames) is a non-probe host.
 static void probe_host_nav_needs_view_to_leave_probe_hosts() {
     Harness h;
     showPortal(h, kG, "");
@@ -877,9 +880,71 @@ static void probe_host_nav_needs_view_to_leave_probe_hosts() {
     h.advanceTo(5000);
     h.ctl->onNavigationDecision(kA);           // another probe host, but the view never left: a plain PageEvent
     CHECK(h.cycleStarts.size() == 2);
+    h.advanceTo(5200);
+    h.ctl->onNavigationDecision("http://ads.example.org/frame");   // a third-party iframe: decisions teach no host
+    h.advanceTo(5400);
+    h.ctl->onNavigationDecision(kG);
+    CHECK(h.cycleStarts.size() == 2);
     h.advanceTo(7100);
     CHECK(h.cycleStarts.size() == 3);
     CHECK(h.cycleStarts.back() == 7100);       // deferred to the gap's end (7000), started on the next tick
+}
+
+// R20 (review Important 1): one return gets one immediate cycle; a stream of decisions to the probe host with no load
+// end in between never breaks the 3 s gap again.
+static void probe_host_decision_storm_keeps_gap() {
+    Harness h;
+    showPortal(h, kG, kPortal);
+    h.autoCompleteMs = 100;
+    h.autoReport = captive(kG, kPortal);
+    h.advanceTo(4000);
+    h.ctl->onLoadEnd(kPortal);                 // the view is on the portal's host; a PageEvent cycle at 4000
+    CHECK(h.cycleStarts.size() == 2);
+    h.advanceTo(5000);
+    h.ctl->onNavigationDecision(kG);           // the return
+    CHECK(h.cycleStarts.size() == 3);
+    CHECK(h.cycleStarts.back() == 5000);       // immediate, 1 s after the previous start
+    for (int64_t t = 5500; t <= 35000; t += 500) {
+        h.advanceTo(t);
+        h.ctl->onNavigationDecision(kG);
+    }
+    h.advanceTo(35100);
+    for (size_t i = 3; i < h.cycleStarts.size(); ++i) CHECK(h.cycleStarts[i] - h.cycleStarts[i - 1] >= 3000);
+    int n = 0;
+    for (int64_t s : h.cycleStarts) if (s >= 5000 && s <= 35000) ++n;
+    CHECK(n <= 11);                            // 5000, 8000, ... 35000
+    CHECK(n >= 10);
+    CHECK(!h.overlap);
+}
+
+// R20: a second return is immediate again only after a new load end on a non-probe host.
+static void second_return_needs_new_load_on_portal_host() {
+    Harness h;
+    showPortal(h, kG, "");
+    reprobeAt(h, 4000, captive());             // load end on the portal's host at 4000
+    h.advanceTo(5000);
+    h.ctl->onNavigationDecision(kG);           // first return: immediate
+    CHECK(h.cycleStarts.size() == 3);
+    CHECK(h.cycleStarts.back() == 5000);
+    h.completeAt(5100, captive());
+    h.advanceTo(5600);
+    h.ctl->onNavigationDecision(kG);           // no load end since: PageEvent
+    h.advanceTo(5800);
+    h.ctl->onLoadEnd(kG);                      // a load end, but on the probe host
+    h.advanceTo(6000);
+    h.ctl->onNavigationDecision(kA);           // the view is on a probe host: PageEvent
+    CHECK(h.cycleStarts.size() == 3);
+    h.advanceTo(8100);                         // the deferred PageEvents start on the first tick after 8000
+    CHECK(h.cycleStarts.size() == 4);
+    CHECK(h.cycleStarts.back() == 8100);
+    h.completeAt(8200, captive());
+    h.advanceTo(9000);
+    h.ctl->onLoadEnd(kPortal);                 // back on the portal's host (gap until 11100)
+    CHECK(h.cycleStarts.size() == 4);
+    h.advanceTo(9500);
+    h.ctl->onNavigationDecision(kA);           // second return: immediate again
+    CHECK(h.cycleStarts.size() == 5);
+    CHECK(h.cycleStarts.back() == 9500);
 }
 
 // Ruling 4: decisions and load ends while the portal is not shown are ignored, and teach nothing about hosts.
@@ -894,11 +959,11 @@ static void page_events_ignored_until_portal_shown() {
         CHECK(h.cycleStarts.size() == 1);
         h.completeAt(100, captive(kG, ""));
         h.advanceTo(4000);
-        h.ctl->onLoadEnd(kG);
+        h.ctl->onNavigationDecision(kG);       // a PageEvent; no load end since the portal was shown
         CHECK(h.cycleStarts.size() == 2);
         h.completeAt(4100, captive());
         h.advanceTo(5000);
-        h.ctl->onNavigationDecision(kA);       // the pre-portal visit to the portal's host was not learned
+        h.ctl->onNavigationDecision(kA);       // the pre-portal load end on the portal's host was not learned
         CHECK(h.cycleStarts.size() == 2);
     }
     {
@@ -916,38 +981,111 @@ static void page_events_ignored_until_portal_shown() {
     }
 }
 
-// Ruling 5: the fallback needs a load end on exactly the view URL, not on another page of the probe host.
+// Rulings 5 / R21: the fallback needs the first load end to be exactly the view URL, not another page of the probe
+// host; a first load end anywhere else just disarms it.
 static void fallback_not_on_same_host_different_path() {
-    Harness h;
-    showPortal(h, kG, kPortal);
-    h.advanceTo(400);
-    h.ctl->onLoadEnd("http://connectivitycheck.gstatic.com/other");
-    h.ctl->onLoadEnd(kG + "?x=1");
-    h.ctl->onLoadEnd("https://connectivitycheck.gstatic.com/generate_204");
-    CHECK(h.navs == std::vector<std::string>{kG});
-    h.ctl->onLoadEnd("http://CONNECTIVITYCHECK.gstatic.com/generate_204#top");   // the same URL (host case, fragment)
-    CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
+    for (const std::string& other : {std::string("http://connectivitycheck.gstatic.com/other"), kG + "?x=1",
+                                     std::string("https://connectivitycheck.gstatic.com/generate_204")}) {
+        Harness h;
+        showPortal(h, kG, kPortal);
+        h.advanceTo(400);
+        h.ctl->onLoadEnd(other);
+        CHECK(h.navs == std::vector<std::string>{kG});
+        h.ctl->onLoadEnd(kG);                  // too late: the first load end consumed the fallback
+        CHECK(h.navs == std::vector<std::string>{kG});
+    }
+    {
+        Harness h;
+        showPortal(h, kG, kPortal);
+        h.advanceTo(400);
+        h.ctl->onLoadEnd("http://CONNECTIVITYCHECK.gstatic.com/generate_204#top");   // the same URL (host case, fragment)
+        CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
+    }
 }
 
-// Ruling 5: once per captive outcome; each later captive outcome arms it again with its own Location.
-static void fallback_once_per_captive_outcome() {
+// R21: armed only by the start-up navigate(viewUrl), consumed by its first load end; shown results never re-arm it,
+// and a non-Captive result disarms it.
+static void fallback_only_on_first_load_after_navigate() {
+    {   // the redirect worked: the first load end is the portal's page, and later probe-URL loads never fall back
+        Harness h;
+        showPortal(h, kG, kPortal);
+        h.advanceTo(400);
+        h.ctl->onLoadEnd(kPortal);
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs == std::vector<std::string>{kG});
+    }
+    {   // a Captive result while shown does not re-arm it
+        Harness h;
+        showPortal(h, kG, kPortal);
+        h.advanceTo(400);
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
+        answerNextCycle(h, captive(kG, kPortal));
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs.size() == 2);
+    }
+    {   // a Captive result before the first load end leaves it armed
+        Harness h;
+        showPortal(h, kG, kPortal);
+        h.advanceTo(200);
+        h.ctl->onNavigationDecision(kG);
+        answerNextCycle(h, captive(kA, ""));   // started at 3100 (3 s after the start-up cycle)
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
+    }
+    {   // a non-Captive result before the first load end disarms it
+        for (CycleResult res : {CycleResult::Limited, CycleResult::NoNetwork, CycleResult::Partial}) {
+            Harness h;
+            showPortal(h, kG, kPortal);
+            h.advanceTo(200);
+            h.ctl->onNavigationDecision(kG);
+            answerNextCycle(h, report(res));
+            h.ctl->onLoadEnd(kG);
+            CHECK(h.navs == std::vector<std::string>{kG});
+            CHECK(h.exits.empty());
+        }
+    }
+    {   // a Retry that answers Captive navigates, so it arms it too
+        Harness h;
+        h.ctl->start();
+        h.completeAt(100, report(CycleResult::Limited));
+        h.ctl->onButton(Button::Retry);
+        h.completeAt(600, captive(kA, kPortal));
+        h.advanceTo(900);
+        h.ctl->onLoadEnd(kA);
+        CHECK(h.navs == (std::vector<std::string>{kA, kPortal}));
+    }
+}
+
+// R21: after the login the portal sends the view back to the probe URL; that load end must not fall back to the
+// portal's login page.
+static void fallback_not_after_login_redirect_back_to_probe() {
     Harness h;
     showPortal(h, kG, kPortal);
+    h.autoCompleteMs = 100;
+    h.autoReport = captive(kG, kPortal);
     h.advanceTo(400);
-    h.ctl->onLoadEnd(kG);
-    CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
-    h.ctl->onLoadEnd(kG);
-    CHECK(h.navs.size() == 2);
-    answerNextCycle(h, report(CycleResult::Limited));      // not a captive outcome: nothing re-armed
-    h.ctl->onLoadEnd(kG);
-    CHECK(h.navs.size() == 2);
-    answerNextCycle(h, captive(kG, kPortal));              // a new captive outcome
-    h.ctl->onLoadEnd(kG);
-    CHECK(h.navs == (std::vector<std::string>{kG, kPortal, kPortal}));
-    answerNextCycle(h, captive(kG, ""));                   // the latest captive outcome has no Location
-    h.ctl->onLoadEnd(kG);
-    CHECK(h.navs.size() == 3);
-    CHECK(h.screens == std::vector<Screen>{Screen::None});
+    h.ctl->onNavigationDecision(kPortal);      // WebKit followed the portal's redirect
+    h.ctl->onLoadEnd(kPortal);                 // the login page is shown
+    CHECK(h.navs == std::vector<std::string>{kG});
+    h.advanceTo(20000);
+    h.ctl->onUserActivity();
+    h.ctl->onSubmitLike();                     // the user signs in
+    h.ctl->onNavigationDecision(kPortal + "&done=1");
+    h.ctl->onLoadEnd(kPortal + "&done=1");
+    h.advanceTo(21000);
+    const size_t before = h.cycleStarts.size();
+    h.ctl->onNavigationDecision(kG);           // the portal redirects back to G: a return, probed at once
+    CHECK(h.cycleStarts.size() == before + 1);
+    CHECK(h.cycleStarts.back() == 21000);
+    h.ctl->onLoadEnd(kG);                      // the probe URL loads (204 or a "success" page)
+    CHECK(h.navs == std::vector<std::string>{kG});   // no fallback to the login page
+    h.autoReport = report(CycleResult::Online);
+    h.advanceTo(21100);                        // the return's cycle answers Online
+    CHECK(h.screens == (std::vector<Screen>{Screen::None, Screen::Connected}));
+    h.advanceTo(23100);
+    CHECK(h.exits == std::vector<int>{kExitOnline});
+    CHECK(h.navs == std::vector<std::string>{kG});
 }
 
 // Ruling 7: a Captive result while the portal is shown keeps the page.
@@ -1112,9 +1250,12 @@ int main() {
     nothing_runs_after_exit();
     probe_hosts_compare_host_and_port_case_insensitively();
     probe_host_nav_needs_view_to_leave_probe_hosts();
+    probe_host_decision_storm_keeps_gap();
+    second_return_needs_new_load_on_portal_host();
     page_events_ignored_until_portal_shown();
     fallback_not_on_same_host_different_path();
-    fallback_once_per_captive_outcome();
+    fallback_only_on_first_load_after_navigate();
+    fallback_not_after_login_redirect_back_to_probe();
     shown_captive_does_not_renavigate();
     shown_clock_wrong_exits_20_after_2s();
     retry_result_uses_startup_table();
