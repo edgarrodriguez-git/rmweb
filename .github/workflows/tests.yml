@@ -1,21 +1,27 @@
 name: tests
 
+# master is upstream's branch. This fork's work lives on wifi-signin, and its release candidates are pushed as
+# wifi-signin-v* tags, so both run the host tests too; workflow_dispatch allows a manual run from the Actions tab.
 on:
   push:
-    branches: [master]
+    branches: [master, wifi-signin]
+    tags: ['wifi-signin-v*']
   pull_request:
     branches: [master]
+  workflow_dispatch:
 
 jobs:
   host-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # run-tests.sh drives clang++ (C++ unit tests), bash (shell tests), shellcheck
       # (lint of the shipped device shell), python3 + openssl (fake captive portal tests) and
-      # libsoup-3.0-dev + pkg-config (probe runner test; libsoup pulls in glib-networking for TLS);
+      # libsoup-3.0-dev + pkg-config + glib-networking (probe runner test; glib-networking is GIO's TLS backend,
+      # which libsoup already pulls in on noble — listed so the dependency is explicit);
       # install the compilers, linter and tools explicitly.
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y clang shellcheck python3 openssl libsoup-3.0-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y clang shellcheck python3 openssl libsoup-3.0-dev glib-networking pkg-config
       - name: Run host tests
         run: bash scripts/run-tests.sh
