@@ -48,3 +48,11 @@ Device-side integration (not shipped, documented only)
   place rmweb in the stock launcher. See docs/install.md for versions.
 
 Fonts and media bundled with the OS or device are property of their owners.
+
+Wi-Fi Sign-in
+-------------
+This fork adds a captive-portal sign-in mode ("Wi-Fi Sign-in") to rmweb 0.9.7
+(MIT, exp78; see LICENSE). The upstream project is
+https://github.com/exp78/rmweb. Some pieces of the sign-in mode are ported from
+jhasubhash/rmbrowser (https://github.com/jhasubhash/rmbrowser) — MIT. Those
+pieces remain under their original MIT license and copyright.
