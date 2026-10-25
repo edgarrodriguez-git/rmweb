@@ -2,7 +2,10 @@
 // single line, so the libsoup runner can be tested on the host against tools/fake-portal (tests/probe_runner_test.sh).
 //
 //   probe-cli --google URL --apple URL --confirm URL [--ca FILE] [--route-file FILE] [--iface NAME]
-//   -> result=<cycleResultName> view=<url> location=<url> g_addr=<addr> skew=<seconds|unknown>
+//   -> result=<cycleResultName> view=<url> location=<url> g_addr=<addr> skew=<seconds|unknown> c_addr=<addr>
+//
+// c_addr is the HTTPS confirmation's peer address, empty when it was not sent or never connected. It comes last so the
+// fields before it keep their order.
 //
 // Exit 0 once a cycle ran (whatever its result), 2 on a usage error. A GIO without a TLS backend (no
 // glib-networking) is reported on stderr as "no TLS backend": the HTTPS confirmation cannot succeed without one.
@@ -23,7 +26,7 @@ int usage(const char* argv0, bool error) {
     std::fprintf(error ? stderr : stdout,
                  "usage: %s --google URL --apple URL --confirm URL [--ca FILE] [--route-file FILE] [--iface NAME]\n"
                  "Runs one captive-portal probe cycle and prints:\n"
-                 "  result=<result> view=<url> location=<url> g_addr=<addr> skew=<seconds|unknown>\n"
+                 "  result=<result> view=<url> location=<url> g_addr=<addr> skew=<seconds|unknown> c_addr=<addr>\n"
                  "Defaults: --route-file /proc/net/route, --iface wlan0, no --ca (system trust).\n",
                  argv0);
     return error ? 2 : 0;
@@ -84,8 +87,8 @@ int main(int argc, char** argv) {
     g_main_loop_unref(loop);
 
     const std::string skew = report.dateKnown ? std::to_string(report.skewSec) : std::string("unknown");
-    std::printf("result=%s view=%s location=%s g_addr=%s skew=%s\n", cycleResultName(report.outcome.result),
+    std::printf("result=%s view=%s location=%s g_addr=%s skew=%s c_addr=%s\n", cycleResultName(report.outcome.result),
                 report.outcome.viewUrl.c_str(), report.outcome.locationUrl.c_str(), report.gAddress.c_str(),
-                skew.c_str());
+                skew.c_str(), report.confirmAddress.c_str());
     return 0;
 }
