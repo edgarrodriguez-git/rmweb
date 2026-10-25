@@ -151,7 +151,10 @@ int main() {
     CHECK(!redactLogLine("[form] x").has_value() && !redactLogLine("setFieldText").has_value());
     CHECK(!redactLogLine("[nav] uri=https://h.x/\n[meta] title=T").has_value());     // any line of a multi-line message
     CHECK(!redactLogLine("prefix [dl] suffix").has_value());                         // anywhere in the line
+    CHECK(!redactLogLine("[library] imported /home/root/Downloads/Smith-invoice.pdf").has_value());   // server file name
+    CHECK(!redactLogLine("[library] import failed for /home/root/Downloads/Smith-invoice.pdf: no space").has_value());
     // near misses are not page content and stay
+    CHECK(red("[libraryx] x") == "[libraryx] x");
     CHECK(red("[metadata] ok") == "[metadata] ok");
     CHECK(red("[t] page JS started") == "[t] page JS started");
     CHECK(red("[t] pageBy 1 ok") == "[t] pageBy 1 ok");

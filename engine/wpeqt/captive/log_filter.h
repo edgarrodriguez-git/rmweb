@@ -117,10 +117,12 @@ inline std::string logRedactUrls(const std::string& s) {
 
 // A line containing any of these is dropped whole: each carries page content (or a page-controlled string) that must
 // never reach the flash. [form]/setFieldText: typed field values. [meta]: the page title ("Welcome, Mr Smith — room 412").
-// [dl]: a server-supplied file name. [find]/[search]: in-page find and address-bar search terms. "[t] page JS done": the
-// page-script answer, which echoes DOM state. Matching is a plain, case-sensitive substring test anywhere in the message,
-// so a multi-line message is dropped as a whole when any of its lines carries one.
-inline constexpr const char* kDroppedLogTags[] = {"[form]", "setFieldText", "[meta]", "[dl]", "[find]", "[search]", "[t] page JS done"};
+// [dl] and [library]: a server-supplied file name (the download, and its import into the xochitl library).
+// [find]/[search]: in-page find and address-bar search terms. "[t] page JS done": the page-script answer, which echoes
+// DOM state. Matching is a plain, case-sensitive substring test anywhere in the message, so a multi-line message is
+// dropped as a whole when any of its lines carries one.
+inline constexpr const char* kDroppedLogTags[] = {"[form]", "setFieldText", "[meta]", "[dl]", "[library]", "[find]", "[search]",
+                                                  "[t] page JS done"};
 
 // Filters one log line. nullopt = drop the line (it carries one of kDroppedLogTags); otherwise the line with every URL
 // reduced to scheme://host[:port].
