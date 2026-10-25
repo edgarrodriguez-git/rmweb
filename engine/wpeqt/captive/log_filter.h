@@ -1,7 +1,8 @@
 // Log hygiene for the captive-portal sign-in mode (tests/captive_log_filter_test.cpp). Portal URLs routinely carry room
-// numbers, surnames, voucher codes and session tokens, and the on-flash log must never hold form data or a full URL:
-//   redactLogLine() filters ONE log line before it is written — it drops form-entry lines whole and cuts every
-//                   scheme://... URL down to scheme://host[:port];
+// numbers, surnames, voucher codes and session tokens, and the on-flash log must never hold page content, form data or
+// credentials:
+//   redactLogLine() filters ONE log line before it is written. It drops, whole, every line that carries page content
+//                   (see kDroppedLogTags below) and cuts every scheme://... URL down to scheme://host[:port];
 //   RotatingLog     is the size-capped file the filtered lines go to (one rotation, path -> path.1).
 // Standard library plus POSIX open/fstat/write/rename only — no Qt — so it is unit-tested off-device. The app's Qt
 // message handler (Task 13) calls both: redactLogLine() first, RotatingLog::append() on whatever survives.
@@ -32,14 +33,45 @@ inline bool logRedactIsSchemeChar(char c) {
 inline bool logRedactEndsAuthority(char c) {
     return c == '/' || c == '?' || c == '#' || logRedactIsWs(c) || c == '"' || c == '\'' || c == ')' || c == '>';
 }
-// What follows the authority (path, query, fragment) is cut up to the first of these; here ']' does end the URL
-// ("[nav] [https://h/p?q] done" keeps its closing bracket).
-inline bool logRedactEndsTail(char c) {
-    return logRedactIsWs(c) || c == '"' || c == '\'' || c == ')' || c == ']' || c == '>';
+// The whole URL tail (path, query, fragment) is removed up to the next space, tab, CR or LF, or the end of the string.
+// It is NOT cut at ')' ']' '>' '"' or an apostrophe: WebKit keeps those raw in canonical URIs ("/wiki/Foo_(bar)?token=...",
+// "/(S(abc123))/login.aspx?room=12", "/O'Brien/in?room=12"), and stopping at one would leave the rest of the URL in the log.
+inline bool logRedactIsTailWs(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+// The one character that is kept out of a removed tail so prose stays readable: a closer, if the URL sits inside its opener.
+inline char logRedactOpenerFor(char closer) {
+    switch (closer) {
+        case ')': return '(';
+        case ']': return '[';
+        case '>': return '<';
+        case '"': return '"';
+        case '\'': return '\'';
+        default:  return '\0';
+    }
+}
+
+// Is the URL whose scheme starts at `at` wrapped by an unclosed `opener`? True when the opener is the character just
+// before the scheme ("(https://..."), or an earlier one on the same line is still open ("(see https://..."): brackets by
+// nesting depth, quotes by odd count. Keeping the closer costs nothing privacy-wise: it is one fixed punctuation character.
+inline bool logRedactIsOpenAt(const std::string& s, std::size_t at, char opener, char closer) {
+    if (at == 0) return false;
+    if (s[at - 1] == opener) return true;
+    const std::size_t nl = s.rfind('\n', at - 1);
+    std::size_t depth = 0;
+    for (std::size_t k = (nl == std::string::npos) ? 0 : nl + 1; k < at; ++k) {
+        if (opener == closer) {
+            if (s[k] == opener) depth = depth ? 0 : 1;
+        } else if (s[k] == opener) {
+            ++depth;
+        } else if (s[k] == closer && depth > 0) {
+            --depth;
+        }
+    }
+    return depth > 0;
 }
 
 // Every "scheme://authority tail" becomes "scheme://host[:port]": userinfo (up to the LAST '@' of the authority) and the
-// tail are removed. Text outside URLs is copied unchanged. Only URLs with a scheme and "://" are recognised.
+// whole tail are removed. Text outside URLs is copied unchanged. Only URLs with a scheme and "://" are recognised.
 inline std::string logRedactUrls(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -47,13 +79,12 @@ inline std::string logRedactUrls(const std::string& s) {
     while (i < s.size()) {
         const std::size_t sep = s.find("://", i);
         if (sep == std::string::npos) break;
-        std::size_t b = sep;                             // the run of scheme characters right before "://"
-        while (b > i && logRedactIsSchemeChar(s[b - 1])) --b;
-        bool hasLetter = false;                          // a scheme starts with a letter; leading digits/+/-/. are plain text
-        for (std::size_t k = b; k < sep; ++k) hasLetter = hasLetter || logRedactIsAlpha(s[k]);
+        std::size_t scheme = sep;                        // the run of scheme characters right before "://" ...
+        while (scheme > i && logRedactIsSchemeChar(s[scheme - 1])) --scheme;
+        while (scheme < sep && !logRedactIsAlpha(s[scheme])) ++scheme;   // ... a scheme starts with a letter
         out.append(s, i, sep + 3 - i);                   // text up to and including "scheme://" (or a bare "://")
         i = sep + 3;
-        if (!hasLetter) continue;                        // "://" without a scheme: not a URL
+        if (scheme == sep) continue;                     // "://" without a scheme: not a URL
 
         std::size_t e = i;
         while (e < s.size() && !logRedactEndsAuthority(s[e])) ++e;
@@ -62,8 +93,14 @@ inline std::string logRedactUrls(const std::string& s) {
             if (s[k] == '@') hostBegin = k + 1;
         }
         out.append(s, hostBegin, e - hostBegin);         // host[:port]
-        while (e < s.size() && !logRedactEndsTail(s[e])) ++e;   // path / query / fragment: gone
-        i = e;
+
+        std::size_t t = e;                               // the tail: gone, up to the next whitespace
+        while (t < s.size() && !logRedactIsTailWs(s[t])) ++t;
+        if (t > e) {                                     // ... except a closer that matches the opener wrapping the URL
+            const char last = s[t - 1], opener = logRedactOpenerFor(last);
+            if (opener != '\0' && logRedactIsOpenAt(s, scheme, opener, last)) out += last;
+        }
+        i = t;
     }
     out.append(s, i, std::string::npos);
     return out;
@@ -71,10 +108,19 @@ inline std::string logRedactUrls(const std::string& s) {
 
 }  // namespace detail
 
-// Filters one log line. nullopt = drop the line (it mentions a form entry: "[form]" or "setFieldText" anywhere, in a
-// multi-line message too); otherwise the line with every URL reduced to scheme://host[:port].
+// A line containing any of these is dropped whole: each carries page content (or a page-controlled string) that must
+// never reach the flash. [form]/setFieldText: typed field values. [meta]: the page title ("Welcome, Mr Smith — room 412").
+// [dl]: a server-supplied file name. [find]/[search]: in-page find and address-bar search terms. "[t] page JS done": the
+// page-script answer, which echoes DOM state. Matching is a plain, case-sensitive substring test anywhere in the message,
+// so a multi-line message is dropped as a whole when any of its lines carries one.
+inline constexpr const char* kDroppedLogTags[] = {"[form]", "setFieldText", "[meta]", "[dl]", "[find]", "[search]", "[t] page JS done"};
+
+// Filters one log line. nullopt = drop the line (it carries one of kDroppedLogTags); otherwise the line with every URL
+// reduced to scheme://host[:port].
 inline std::optional<std::string> redactLogLine(const std::string& line) {
-    if (line.find("[form]") != std::string::npos || line.find("setFieldText") != std::string::npos) return std::nullopt;
+    for (const char* tag : kDroppedLogTags) {
+        if (line.find(tag) != std::string::npos) return std::nullopt;
+    }
     return detail::logRedactUrls(line);
 }
 

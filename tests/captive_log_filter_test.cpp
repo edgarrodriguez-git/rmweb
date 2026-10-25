@@ -74,7 +74,7 @@ int main() {
     CHECK(red("\"https://h.x/a?b=1\" end") == "\"https://h.x\" end");
     CHECK(red("'https://u:p@h.x:81/a' end") == "'https://h.x:81' end");
     CHECK(red("<https://h.x/a?b=1> end") == "<https://h.x> end");
-    CHECK(red("[https://h.x/a?b=1] end") == "[https://h.x] end");   // ']' ends the tail, so the closing bracket survives
+    CHECK(red("[https://h.x/a?b=1] end") == "[https://h.x] end");   // the closing bracket matches the opener, so it survives
     CHECK(red("a https://h.x/p?q\tb") == "a https://h.x\tb");
     CHECK(red("https://h.x/p?q\nnext line") == "https://h.x\nnext line");
     CHECK(red("https://h.x?token=abc") == "https://h.x");
@@ -92,6 +92,46 @@ int main() {
     CHECK(red("1234://h.x/p") == "1234://h.x/p");                                   // no letter before "://": not a scheme
     CHECK(red("://h.x/p") == "://h.x/p");
     CHECK(red("http://") == "http://");
+
+    // ---- redactLogLine: the whole tail goes, even past ) ] ' " > (R12) ----
+    CHECK(red("[nav] uri=https://h.x/wiki/Foo_(bar)?token=SECRET") == "[nav] uri=https://h.x");
+    CHECK(red("https://portal.x/(S(abc123))/login.aspx?room=12&name=Smith") == "https://portal.x");
+    CHECK(red("https://portal.x/O'Brien/in?room=12&name=Smith") == "https://portal.x");
+    CHECK(red("https://h.x/p?q=a]b&room=12") == "https://h.x");
+    CHECK(red("[nav] load failed: https://h.x/p?q=1&r=(2) (err)") == "[nav] load failed: https://h.x (err)");
+    CHECK(red("(see https://h.x/a?b=1) end") == "(see https://h.x) end");
+    CHECK(red("(https://h.x/Foo_(bar)?token=SECRET)") == "(https://h.x)");
+    CHECK(red("https://h.x/wiki/Foo_(bar)?token=SECRET") == "https://h.x");
+    CHECK(red("https://portal.x/O'Brien/in?room=12") == "https://portal.x");
+    CHECK(red("\"https://h.x/a?b\"") == "\"https://h.x\"");
+    CHECK(red("[tls] cert error: https://u:p@h:8443/a#f (x)") == "[tls] cert error: https://h:8443 (x)");
+    CHECK(red("a <https://h.x/p?q>") == "a <https://h.x>");
+    CHECK(red("x https://h.x/p?a>b=SECRET end") == "x https://h.x end");
+    CHECK(red("https://h.x/p?q=1\r\nnext line") == "https://h.x\r\nnext line");     // CR and LF end the tail
+    CHECK(red("\"https://h.x/a?b\" and \"https://i.y/c?d\" end") == "\"https://h.x\" and \"https://i.y\" end");
+    // The kept closer is only the one that matches the opener around the URL; anything else is removed with the tail.
+    CHECK(red("see https://h.x/Foo_(bar)") == "see https://h.x");                    // no opener before the URL
+    CHECK(red("(note) see https://h.x/Foo_(bar)") == "(note) see https://h.x");      // the earlier '(' is already closed
+    CHECK(red("(a https://h.x/p?q=(1)) b") == "(a https://h.x) b");
+    CHECK(red("(https://h.x/p?q]") == "(https://h.x");                               // ']' does not close '('
+    CHECK(red("(https://h.x),SECRET") == "(https://h.x");                            // the tail's last char is not a closer
+    CHECK(red("[nav] (https://h.x/p?q)\n(https://i.y/r?s)") == "[nav] (https://h.x)\n(https://i.y)");
+
+    // ---- redactLogLine: lines carrying page content are dropped whole (R13) ----
+    CHECK(!redactLogLine("[meta] title=Welcome Mr Smith, room 412").has_value());
+    CHECK(!redactLogLine("[dl] -> /home/root/Downloads/Smith-invoice.pdf").has_value());
+    CHECK(!redactLogLine("[find][dbg] term=smith").has_value());
+    CHECK(!redactLogLine("[find] no match").has_value());
+    CHECK(!redactLogLine("[search][dbg] words=room 412").has_value());
+    CHECK(!redactLogLine("[t] page JS done sy=120 sm=900").has_value());
+    CHECK(!redactLogLine("[form] x").has_value() && !redactLogLine("setFieldText").has_value());
+    CHECK(!redactLogLine("[nav] uri=https://h.x/\n[meta] title=T").has_value());     // any line of a multi-line message
+    CHECK(!redactLogLine("prefix [dl] suffix").has_value());                         // anywhere in the line
+    // near misses are not page content and stay
+    CHECK(red("[metadata] ok") == "[metadata] ok");
+    CHECK(red("[t] page JS started") == "[t] page JS started");
+    CHECK(red("[t] pageBy 1 ok") == "[t] pageBy 1 ok");
+    CHECK(red("[dlx] ok [find ok") == "[dlx] ok [find ok");
 
     // ---- redactLogLine: only scheme:// is detected ----
     CHECK(red("www.example.com/x?y") == "www.example.com/x?y");
