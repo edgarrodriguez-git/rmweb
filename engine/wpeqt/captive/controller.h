@@ -40,7 +40,8 @@
 //    non-probe host, and no ProbeHostNav has been given since the last load end. Every other decision, and every load
 //    end, is a PageEvent — so a stream of decisions to a probe host gets one immediate cycle, then the 3 s gap.
 //  - Location fallback: armed only by the one navigate(viewUrl) that shows the portal (a start-up or Retry Captive
-//    result, and only when that outcome had a locationUrl), consumed by the FIRST load end after it. When that load end is exactly viewUrl (fragment ignored,
+//    result, and only when that outcome had an http or https locationUrl — R28: javascript:, data:, rmweb:, … never
+//    reach navigate), consumed by the FIRST load end after it. When that load end is exactly viewUrl (fragment ignored,
 //    see ctlUrlKey) — the view stayed on the probe URL with an empty page or an error — it navigates to locationUrl;
 //    any other first load end just disarms it, so a later return to the probe URL (a portal sending the tablet back
 //    to G after the login) never triggers it. Any non-Captive cycle result while shown also disarms it; a later
@@ -101,6 +102,10 @@ struct ControllerHooks {
     std::function<int64_t()> nowMs;                                          // monotonic clock, ms
     std::function<void(int delayMs, std::function<void()>)> after;          // one-shot timer on the engine thread
     std::function<void(std::function<void(const CycleReport&)>)> runCycle;  // async; `done` exactly once, later
+    // May be called synchronously from inside onLoadEnd: the Location fallback navigates from there. The host must let
+    // that navigation win over any load it issues itself after onLoadEnd returns — in a load-failed handler, call
+    // onLoadEnd only AFTER load_alternate_html (the error page), or defer its own load_uri — or the fallback is lost
+    // under the error page (R31).
     std::function<void(const std::string& url)> navigate;
     std::function<void(Screen)> showScreen;
     std::function<void(const std::string& text)> setStatus;                 // "" clears
@@ -157,6 +162,14 @@ inline std::string ctlUrlKey(const std::string& url) {
     std::string rest = pathAt == std::string::npos ? std::string() : u.substr(pathAt);
     if (rest.empty() || rest[0] == '?') rest.insert(0, 1, '/');
     return ctlLower(u.substr(0, sep)) + "://" + ctlHostKey(u) + rest;
+}
+
+// Is uri an absolute http:// or https:// URL (scheme in any letter case)? The only kind the Location fallback opens.
+inline bool ctlIsWebUrl(const std::string& uri) {
+    const std::size_t sep = ctlSchemeEnd(uri);
+    if (sep == std::string::npos) return false;
+    const std::string scheme = ctlLower(uri.substr(0, sep));
+    return scheme == "http" || scheme == "https";
 }
 
 inline bool ctlScreenOffers(Screen s, Button b) {
@@ -324,7 +337,7 @@ private:
         hooks_.showScreen(Screen::None);
         fallbackViewKey_ = detail::ctlUrlKey(o.viewUrl);       // the only place the fallback is armed
         fallbackLocation_ = o.locationUrl;
-        fallbackArmed_ = !o.locationUrl.empty();
+        fallbackArmed_ = detail::ctlIsWebUrl(o.locationUrl);
         hooks_.navigate(o.viewUrl);
         if (exit_ != ExitState::None) return;
         sched_.arm(now);

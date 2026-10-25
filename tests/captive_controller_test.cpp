@@ -1088,6 +1088,41 @@ static void fallback_not_after_login_redirect_back_to_probe() {
     CHECK(h.navs == std::vector<std::string>{kG});
 }
 
+// R28: the Location fallback is armed only for an http or https locationUrl (any letter case); a portal-chosen
+// javascript:, data: or rmweb: URL never reaches navigate.
+static void fallback_only_for_http_and_https() {
+    for (const std::string& loc : {std::string("javascript:alert(1)"), std::string("data:text/html,x"),
+                                   std::string("rmweb:tls-continue"), std::string("JavaScript:alert(1)"),
+                                   std::string("file:///home/root/.wifi-signin/log"), std::string("ftp://portal.example/x")}) {
+        Harness h;
+        showPortal(h, kG, loc);
+        h.advanceTo(400);
+        h.ctl->onNavigationDecision(kG);
+        h.ctl->onLoadEnd(kG);                  // the view stayed on the probe URL: still no fallback to that Location
+        CHECK(h.navs == std::vector<std::string>{kG});
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs == std::vector<std::string>{kG});
+        CHECK(h.exits.empty());
+    }
+    for (const std::string& loc : {std::string("HTTPS://portal/x"), std::string("Http://portal.example/login"), kPortal}) {
+        Harness h;
+        showPortal(h, kG, loc);
+        h.advanceTo(400);
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs == (std::vector<std::string>{kG, loc}));
+    }
+    {   // a Retry that answers Captive with a non-web Location does not arm it either
+        Harness h;
+        h.ctl->start();
+        h.completeAt(100, report(CycleResult::Limited));
+        h.ctl->onButton(Button::Retry);
+        h.completeAt(600, captive(kA, "rmweb:tls-continue"));
+        h.advanceTo(900);
+        h.ctl->onLoadEnd(kA);
+        CHECK(h.navs == std::vector<std::string>{kA});
+    }
+}
+
 // Ruling 7: a Captive result while the portal is shown keeps the page.
 static void shown_captive_does_not_renavigate() {
     Harness h;
@@ -1256,6 +1291,7 @@ int main() {
     fallback_not_on_same_host_different_path();
     fallback_only_on_first_load_after_navigate();
     fallback_not_after_login_redirect_back_to_probe();
+    fallback_only_for_http_and_https();
     shown_captive_does_not_renavigate();
     shown_clock_wrong_exits_20_after_2s();
     retry_result_uses_startup_table();
