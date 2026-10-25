@@ -33,6 +33,10 @@ inline bool logRedactIsSchemeChar(char c) {
 inline bool logRedactEndsAuthority(char c) {
     return c == '/' || c == '?' || c == '#' || logRedactIsWs(c) || c == '"' || c == '\'' || c == ')' || c == '>';
 }
+// The RFC 3986 authority end — the path/query/fragment start, or whitespace — bounds the search for the '@' that ends
+// userinfo. It ignores the closers above: WebKit leaves ) and ' raw in userinfo ("https://user:pa)ss@h.x/"), so a closer
+// before the '@' must not end the authority there and emit the userinfo's prefix as the host.
+inline bool logRedactEndsRfcAuthority(char c) { return c == '/' || c == '?' || c == '#' || logRedactIsWs(c); }
 // The whole URL tail (path, query, fragment) is removed up to the next space, tab, CR or LF, or the end of the string.
 // It is NOT cut at ')' ']' '>' '"' or an apostrophe: WebKit keeps those raw in canonical URIs ("/wiki/Foo_(bar)?token=...",
 // "/(S(abc123))/login.aspx?room=12", "/O'Brien/in?room=12"), and stopping at one would leave the rest of the URL in the log.
@@ -70,8 +74,9 @@ inline bool logRedactIsOpenAt(const std::string& s, std::size_t at, char opener,
     return depth > 0;
 }
 
-// Every "scheme://authority tail" becomes "scheme://host[:port]": userinfo (up to the LAST '@' of the authority) and the
-// whole tail are removed. Text outside URLs is copied unchanged. Only URLs with a scheme and "://" are recognised.
+// Every "scheme://authority tail" becomes "scheme://host[:port]": userinfo (up to the LAST '@' before the authority's
+// / ? # or whitespace) and the whole tail are removed. Text outside URLs is copied unchanged. Only URLs with a scheme and
+// "://" are recognised.
 inline std::string logRedactUrls(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -86,12 +91,14 @@ inline std::string logRedactUrls(const std::string& s) {
         i = sep + 3;
         if (scheme == sep) continue;                     // "://" without a scheme: not a URL
 
-        std::size_t e = i;
-        while (e < s.size() && !logRedactEndsAuthority(s[e])) ++e;
+        std::size_t aend = i;                            // the RFC 3986 authority, up to / ? # or whitespace
+        while (aend < s.size() && !logRedactEndsRfcAuthority(s[aend])) ++aend;
         std::size_t hostBegin = i;                       // userinfo = everything up to the LAST '@' of the authority
-        for (std::size_t k = i; k < e; ++k) {
+        for (std::size_t k = i; k < aend; ++k) {
             if (s[k] == '@') hostBegin = k + 1;
         }
+        std::size_t e = hostBegin;                       // the host[:port] ends where the surrounding text closes the URL
+        while (e < s.size() && !logRedactEndsAuthority(s[e])) ++e;
         out.append(s, hostBegin, e - hostBegin);         // host[:port]
 
         std::size_t t = e;                               // the tail: gone, up to the next whitespace

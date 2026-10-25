@@ -117,6 +117,30 @@ int main() {
     CHECK(red("(https://h.x),SECRET") == "(https://h.x");                            // the tail's last char is not a closer
     CHECK(red("[nav] (https://h.x/p?q)\n(https://i.y/r?s)") == "[nav] (https://h.x)\n(https://i.y)");
 
+    // ---- redactLogLine: userinfo holding an authority terminator ) ' " > never leaks its prefix ----
+    // The '@' search runs to the RFC 3986 authority end (/ ? # whitespace) first; WebKit leaves ) and ' raw in userinfo.
+    CHECK(red("[nav] uri=https://user:pa)ss@h.x/p?room=12") == "[nav] uri=https://h.x");
+    CHECK(red("[nav] uri=https://user:pa'ss@h.x/p?room=12") == "[nav] uri=https://h.x");
+    CHECK(red("[nav] uri=https://user:pa\"ss@h.x/p?room=12") == "[nav] uri=https://h.x");
+    CHECK(red("[nav] uri=https://user:pa>ss@h.x/p?room=12") == "[nav] uri=https://h.x");
+    CHECK(red("https://roomguest:Smith'412@portal.example:8443/login") == "https://portal.example:8443");
+    // no path: the authority runs to whitespace or the end
+    CHECK(red("https://user:pa)ss@h.x") == "https://h.x");
+    CHECK(red("https://user:pa'ss@h.x:81") == "https://h.x:81");
+    CHECK(red("x https://user:pa\"ss@h.x y") == "x https://h.x y");
+    CHECK(red("x https://user:pa>ss@h.x\ty") == "x https://h.x\ty");
+    CHECK(red("https://u:p)w@[::1]:8080") == "https://[::1]:8080");
+    // inside parentheses / quotes: the matching closer is still kept (R14)
+    CHECK(red("(see https://u:p)w@h.x/a) end") == "(see https://h.x) end");
+    CHECK(red("(https://u:p)w@h.x) end") == "(https://h.x) end");
+    CHECK(red("'https://u:p'w@h.x/a' end") == "'https://h.x' end");
+    CHECK(red("\"https://u:p\"w@h.x/a?b\" end") == "\"https://h.x\" end");
+    CHECK(red("<https://u:p>w@h.x/a> end") == "<https://h.x> end");
+    // the [tls] form
+    CHECK(red("[tls] cert error: https://roomguest:Smith'412@portal.example:8443/login (x)")
+          == "[tls] cert error: https://portal.example:8443 (x)");
+    CHECK(red("[tls] cert error: https://u:p)q@h:8443/a#f (x)") == "[tls] cert error: https://h:8443 (x)");
+
     // ---- redactLogLine: lines carrying page content are dropped whole (R13) ----
     CHECK(!redactLogLine("[meta] title=Welcome Mr Smith, room 412").has_value());
     CHECK(!redactLogLine("[dl] -> /home/root/Downloads/Smith-invoice.pdf").has_value());
