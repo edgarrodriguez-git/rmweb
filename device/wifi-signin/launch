@@ -1,0 +1,269 @@
+#!/bin/sh
+# wifi-signin launch: takes the e-ink panel from xochitl, runs the captive-portal sign-in app, and always gives
+# the panel back. It runs as root in the transient service "wifi-signin" that appload-entry.sh starts, outside
+# xochitl's cgroup, so stopping xochitl cannot kill it. Spec: docs/wifi-signin/design.md section 6, steps 1-8;
+# the hazards it handles are listed in section 3.
+#
+# Each step appends a token to $WS_RUN/state, and cleanup undoes only what is recorded. TRIPLETAP,
+# STOPPED_XOCHITL and MOUNTED are written just BEFORE their action: sh runs a trap only once the foreground
+# command returns, so a TERM (or a SIGKILL) landing during `systemctl stop xochitl` must still find the token,
+# or nothing would start xochitl again. Recording early is safe because cleanup re-checks the real state before
+# each undo: it starts tripletap (a no-op if it runs), starts xochitl only if it is not active, and unmounts
+# only an overlay that /proc/mounts shows as ours.
+#
+# Exit code: the app's (after cleanup), 11 if another session holds the lock, 12 for every other refusal (the
+# log line before it says which).
+set -u
+
+WS_APP=${WS_APP:-/home/root/xovi/exthome/appload/wifi-signin}
+# Dev-only override hook (plan Task 12): read before any WS_* timing variable, so it can set them.
+LAUNCH_ENV=
+if [ -f "$WS_APP/launch.env" ]; then
+  # shellcheck source=/dev/null
+  . "$WS_APP/launch.env"
+  LAUNCH_ENV=1
+fi
+# shellcheck source=/dev/null
+. "$WS_APP/lib.sh"
+export HOME=/home/root
+
+READY="$WS_RUN/ready"
+ARMED=          # set once the lock is ours: only then may the exit path run cleanup
+LEAVING=
+APP_PID=        # the app while it runs (a child of ours, not yet reaped)
+APP_RC=
+APP_CS=0        # how long the last run lasted, in centiseconds of the boot clock
+LOGGED_RC=
+REFRESH_PID=
+WATCH_PID=
+
+log_exit() { ws_log "exit $1 ($(ws_exit_meaning "$1"))"; LOGGED_RC=$1; }
+
+reap() { # stop one of our background loops and reap it
+  [ -n "$1" ] || return 0
+  kill "$1" 2>/dev/null
+  wait "$1" 2>/dev/null
+  return 0
+}
+
+# Step 8, the single exit path: stop our loops, run cleanup if the lock is ours, then exit with $1, or with the
+# app's own code if a signal arrived while it ran (cleanup has stopped it by then).
+leave() {
+  [ -n "$LEAVING" ] && return 0
+  LEAVING=1
+  rc=$1
+  trap '' TERM INT HUP                     # nothing may interrupt the restore
+  reap "$WATCH_PID"; WATCH_PID=
+  reap "$REFRESH_PID"; REFRESH_PID=        # before cleanup rewrites or drops the wakelock
+  if [ -n "$ARMED" ]; then
+    if [ -n "$APP_PID" ] && ! ws_state_has "APP=$APP_PID"; then ws_state_add "APP=$APP_PID"; fi
+    "$WS_APP/cleanup" trap
+  fi
+  if [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then
+    wait "$APP_PID" 2>/dev/null
+    rc=$?
+  fi
+  [ "$rc" = "$LOGGED_RC" ] || log_exit "$rc"
+  trap - EXIT
+  exit "$rc"
+}
+
+refuse() { # refuse CODE WHY
+  ws_log "$2"
+  log_exit "$1"
+  leave "$1"
+}
+
+on_signal() { # on_signal NAME CODE
+  [ -n "$LEAVING" ] && return 0
+  ws_log "caught SIG$1"
+  leave "$2"
+}
+trap 'leave $?' EXIT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal INT 130' INT
+trap 'on_signal HUP 129' HUP
+
+ws_log "start (pid $$)${LAUNCH_ENV:+, with overrides from $WS_APP/launch.env}"
+
+# --- Step 1: lock -------------------------------------------------------------------------------------------
+if ! mkdir "$WS_RUN" 2>/dev/null; then
+  owner=$(cat "$WS_RUN/pid" 2>/dev/null) || owner=
+  if [ -n "$owner" ] && [ "$owner" != "$$" ] && kill -0 "$owner" 2>/dev/null; then
+    refuse 11 "already running: pid $owner holds $WS_RUN"          # cleanup stays disarmed
+  fi
+  # The owner died without its cleanup finishing (ExecStopPost normally runs it). Undo what it recorded
+  # (an overlay still mounted, a stopped xochitl or tripletap), then start afresh.
+  ws_log "stale $WS_RUN (pid ${owner:-none} is gone): undoing its recorded state and taking it over"
+  "$WS_APP/cleanup" post
+  if [ -d "$WS_RUN" ] && [ "$(cat "$WS_RUN/pid" 2>/dev/null)" = "$owner" ]; then rm -rf "$WS_RUN"; fi
+  mkdir "$WS_RUN" 2>/dev/null || refuse 11 "could not take $WS_RUN"
+fi
+if ! { echo "$$" > "$WS_RUN/pid" && : > "$WS_RUN/state"; } 2>/dev/null; then
+  rm -rf "$WS_RUN"
+  refuse 11 "could not write the lock in $WS_RUN"
+fi
+chmod 700 "$WS_RUN" 2>/dev/null   # the app's raw stderr and its profile live here
+ARMED=1
+
+# --- Step 2: wakelock, before tripletap or xochitl is touched ---------------------------------------------
+# A 15 min timed lock: with xochitl stopped nothing else holds one, and kernel autosleep would suspend the
+# device (a resume can start a second xochitl over the app). Timed, so it expires even if everything is killed.
+if ws_wakelock "wifi-signin 900000000000"; then
+  ws_state_add WAKELOCK
+else
+  refuse 12 "could not take the wakelock ($WS_SYSPOWER/wake_lock): not touching tripletap or xochitl"
+fi
+
+# --- Step 3: tripletap (a triple power press would restart xochitl over the app) ------------------------------
+if systemctl is-active --quiet xovi-tripletap; then
+  ws_state_add TRIPLETAP
+  systemctl stop xovi-tripletap || ws_log "WARN: systemctl stop xovi-tripletap failed"
+  ws_log "xovi-tripletap stopped"
+fi
+
+# --- Step 4: 30 s guard on the boot-time clock (stopping a just-started xochitl has crashed it) ---------------
+xo_state() { systemctl show -p ActiveState --value xochitl 2>/dev/null; }
+xo_pid() { systemctl show -p MainPID --value xochitl 2>/dev/null; }
+passes=0; last=; age=
+while :; do
+  st=$(xo_state); pid=$(xo_pid); now="$st $pid"
+  if [ -n "$last" ] && [ "$now" != "$last" ]; then
+    ws_log "xochitl changed ($last -> $now): restarting the wait"
+  fi
+  last=$now
+  case $st in
+    active)
+      age=$(ws_xochitl_age) || age=
+      if [ -n "$age" ] && [ "$age" -ge "$WS_GUARD_S" ]; then
+        again="$(xo_state) $(xo_pid)"             # once more, immediately before the stop
+        [ "$again" = "$now" ] && break
+        ws_log "xochitl changed just before the stop ($now -> $again): restarting the wait"
+        last=$again
+      fi ;;
+    activating | deactivating | reloading | refreshing) ;;   # starting or stopping: wait for it to settle
+    *) break ;;                                             # inactive, failed, ...: step 5 refuses
+  esac
+  if [ "$passes" -ge "$WS_GUARD_MAX_S" ]; then
+    refuse 12 "xochitl did not settle within ${WS_GUARD_MAX_S} s ($now): not stopping it"
+  fi
+  [ "$passes" = 0 ] && ws_log "waiting until xochitl has run ${WS_GUARD_S} s ($st, age ${age:-unknown} s)"
+  passes=$(( passes + 1 ))
+  sleep 1
+done
+
+# --- Step 5: stop xochitl ------------------------------------------------------------------------------------
+if [ "$st" != active ]; then
+  refuse 12 "xochitl is ${st:-unknown}, not active: another program owns the display"
+fi
+ws_state_add STOPPED_XOCHITL
+ws_log "stopping xochitl (pid $pid, ${age} s old)"
+systemctl stop xochitl || ws_log "WARN: systemctl stop xochitl failed"
+if systemctl is-active --quiet xochitl; then
+  refuse 12 "xochitl is still active after the stop: not launching"
+fi
+card_free() { ! ws_card_holder >/dev/null; }
+if ! ws_wait_for "$WS_CARD_WAIT_S" card_free; then
+  holder=$(ws_card_holder)
+  refuse 12 "the panel is still held by pid $holder ($(ws_cmdline "$holder")) after ${WS_CARD_WAIT_S} s: not launching"
+fi
+rm -f "$WS_EPD_LOCK"
+ws_settle 1500000
+
+# --- Step 6: overlay (WPE spawns its helpers from the fixed /usr/libexec/wpe-webkit-2.0; / is read-only) -----
+rm -rf "$WS_RUN/ovl"
+if ! { mkdir -p "$WS_RUN/ovl/upper/wpe-webkit-2.0" "$WS_RUN/ovl/work" &&
+       cp -a "$WS_RUNTIME/libexec/wpe-webkit-2.0/." "$WS_RUN/ovl/upper/wpe-webkit-2.0/"; }; then
+  refuse 12 "could not copy the WPE helpers from $WS_RUNTIME/libexec: not launching"
+fi
+ws_state_add MOUNTED
+if ! mount -t overlay overlay -o "lowerdir=$WS_LIBEXEC,upperdir=$WS_RUN/ovl/upper,workdir=$WS_RUN/ovl/work" \
+    "$WS_LIBEXEC"; then
+  refuse 12 "the overlay mount on $WS_LIBEXEC failed: not launching"
+fi
+ws_log "overlay mounted on $WS_LIBEXEC"
+
+# --- Step 7: run the app -------------------------------------------------------------------------------------
+mkdir -p "$WS_RUN/profile" "$WS_RUN/xdg/cache" "$WS_RUN/xdg/data" "$WS_RUN/xdg/config"
+
+start_refresher() { # rewrite the 15 min lock every WS_REFRESH_S while the app runs
+  (
+    s=
+    trap 'kill "$s" 2>/dev/null; exit 0' TERM
+    while :; do
+      sleep "$WS_REFRESH_S" & s=$!
+      wait "$s"
+      kill -0 "$LAUNCH_PID" 2>/dev/null || exit 0         # launch is gone: leave the lock to expire
+      ws_wakelock "wifi-signin 900000000000" || ws_log "WARN: the wakelock refresh failed"
+    done
+  ) &
+  REFRESH_PID=$!
+}
+
+start_watchdog() { # no ready file WS_READY_TIMEOUT_S after exec: SIGKILL the app and the WPE helpers
+  WATCH_PID=
+  [ "$WS_READY_TIMEOUT_S" -gt 0 ] 2>/dev/null || return 0
+  (
+    s=
+    trap 'kill "$s" 2>/dev/null; exit 0' TERM
+    sleep "$WS_READY_TIMEOUT_S" & s=$!
+    wait "$s"
+    [ -e "$READY" ] && exit 0
+    # Only while launch is alive and the PID is still the app: orphaned by a SIGKILLed launch, this loop must
+    # not shoot a PID that cleanup has long since freed for reuse.
+    if ! kill -0 "$LAUNCH_PID" 2>/dev/null || ! ws_app_alive "$APP_PID"; then exit 0; fi
+    : > "$WS_RUN/watchdog"
+    ws_log "no ready file ${WS_READY_TIMEOUT_S} s after the start: killing the app and the WPE helpers"
+    kill -9 "$APP_PID" 2>/dev/null
+    for h in $(ws_helper_pids); do kill -9 "$h" 2>/dev/null; done
+  ) &
+  WATCH_PID=$!
+}
+
+run_app() { # one run; sets APP_RC and APP_CS
+  rm -f "$READY" "$WS_RUN/watchdog"
+  t0=$(ws_uptime_cs) || t0=0
+  (
+    # The runtime's environment goes to the app only: LD_LIBRARY_PATH must not reach systemctl or mount.
+    # shellcheck disable=SC2034  # R is read by rmweb-env.sh
+    R=$WS_RUNTIME
+    # shellcheck source=/dev/null
+    . "$WS_RUNTIME/rmweb-env.sh"
+    export RMWEB_KIOSK=captive RMWEB_PROFILE="$WS_RUN/profile" RMWEB_COOKIES=0 \
+      XDG_CACHE_HOME="$WS_RUN/xdg/cache" XDG_DATA_HOME="$WS_RUN/xdg/data" XDG_CONFIG_HOME="$WS_RUN/xdg/config" \
+      MESA_SHADER_CACHE_DISABLE=true WS_READY_FILE="$READY" WS_LOG="$WS_USERDIR/log"
+    exec "$WS_APP/bin/wifi-signin-wpeqt"
+  ) 2>"$WS_RUN/stderr" &
+  APP_PID=$!
+  ws_state_add "APP=$APP_PID"
+  ws_log "app started (pid $APP_PID)"
+  start_watchdog
+  wait "$APP_PID" 2>/dev/null       # (bash would print a "Killed" job notice into the journal)
+  APP_RC=$?
+  APP_PID=
+  reap "$WATCH_PID"; WATCH_PID=
+  t1=$(ws_uptime_cs) || t1=$t0
+  APP_CS=$(( t1 - t0 ))
+  log_exit "$APP_RC"
+}
+
+quiet() { [ -z "$(ws_helper_pids)" ] && card_free; }
+
+LAUNCH_PID=$$
+start_refresher
+run_app
+# Start-up retry, once: an early failure (any non-zero code but 63) whose stderr shows a display-owner collision
+# or a touch grab failure. Not after the start-up watchdog's kill, which goes straight to cleanup.
+if [ "$APP_RC" -ne 0 ] && [ "$APP_RC" -ne 63 ] && [ "$APP_CS" -lt $(( WS_RETRY_WINDOW_S * 100 )) ] &&
+   [ ! -e "$WS_RUN/watchdog" ] &&
+   grep -qF -e 'Failed to initialize SWTCON' -e '[touch] EVIOCGRAB failed' "$WS_RUN/stderr" 2>/dev/null; then
+  ws_log "start-up failure after $(( APP_CS / 100 )) s with a display or touch marker in stderr: retrying once"
+  if ws_wait_for "$WS_HELPER_WAIT_S" quiet; then
+    rm -f "$WS_EPD_LOCK"
+    ws_settle 3000000
+    run_app
+  else
+    ws_log "WARN: WPE helpers or a panel holder remain after ${WS_HELPER_WAIT_S} s: not retrying"
+  fi
+fi
+leave "$APP_RC"

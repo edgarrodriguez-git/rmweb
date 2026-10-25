@@ -1,0 +1,106 @@
+#!/bin/sh
+# wifi-signin cleanup: gives the panel back to xochitl after a session. Spec: docs/wifi-signin/design.md
+# section 6, step 8. State-driven and idempotent: it undoes only what launch recorded in $WS_RUN/state,
+# re-checks the real state before each undo, and deletes $WS_RUN last, so a second run is a no-op.
+#
+#   cleanup trap   from launch's trap: acts only if $WS_RUN/pid is its parent, the launch that invoked it.
+#   cleanup post   from the unit's ExecStopPost (and from launch, on a stale lock): acts only if the
+#                  recorded launch is gone, killed before its own trap could finish (even by SIGKILL).
+set -u
+
+WS_APP=${WS_APP:-/home/root/xovi/exthome/appload/wifi-signin}
+if [ -f "$WS_APP/launch.env" ]; then   # the same dev overrides launch saw, for ExecStopPost's fresh environment
+  # shellcheck source=/dev/null
+  . "$WS_APP/launch.env"
+fi
+# shellcheck source=/dev/null
+. "$WS_APP/lib.sh"
+trap '' TERM INT HUP                     # a repeated stop request must not interrupt the restore
+
+mode=${1:-post}
+case $mode in
+  trap | post) ;;
+  *) echo "usage: $0 trap|post" >&2; exit 2 ;;
+esac
+
+# 1. Is the recorded state ours to undo?
+[ -f "$WS_RUN/state" ] || exit 0
+owner=$(cat "$WS_RUN/pid" 2>/dev/null) || owner=
+if [ "$mode" = trap ]; then
+  [ "$owner" = "$PPID" ] || exit 0
+elif [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+  exit 0                                 # that launch is alive: its own trap will clean up
+fi
+ws_log "cleanup ($mode): undoing $(tr '\n' ' ' < "$WS_RUN/state")"
+
+# 2. Stop the app (its TERM handler drains the panel), then the WPE helpers.
+apps=$(sed -n 's/^APP=//p' "$WS_RUN/state")
+apps_gone() { for p in $apps; do ws_app_alive "$p" && return 1; done; return 0; }
+# shellcheck disable=SC2329  # called through ws_wait_for
+all_gone() { apps_gone && [ -z "$(ws_helper_pids)" ]; }
+if ! apps_gone; then
+  for p in $apps; do
+    if ws_app_alive "$p"; then kill -TERM "$p" 2>/dev/null; fi
+  done
+  ws_wait_for "$WS_APP_TERM_WAIT_S" apps_gone || ws_log "the app is still running ${WS_APP_TERM_WAIT_S} s after TERM"
+fi
+for h in $(ws_helper_pids); do kill -9 "$h" 2>/dev/null; done
+if ! ws_wait_for "$WS_HELPER_WAIT_S" all_gone; then
+  # Past the app's own 12 s GUI watchdog: it is wedged. A live display owner under a restarted xochitl is the
+  # worse outcome, so it goes too.
+  ws_log "WARN: the app or WPE helpers remain after ${WS_HELPER_WAIT_S} s: kill -9"
+  for p in $apps; do
+    if ws_app_alive "$p"; then kill -9 "$p" 2>/dev/null; fi
+  done
+  for h in $(ws_helper_pids); do kill -9 "$h" 2>/dev/null; done
+  ws_wait_for "$WS_APP_TERM_WAIT_S" all_gone || ws_log "WARN: they are still there"
+fi
+
+# 3. The overlay, only if /proc/mounts shows it is ours.
+if ws_state_has MOUNTED && grep -qF -- "upperdir=$WS_RUN/ovl/upper" "$WS_PROC/mounts" 2>/dev/null; then
+  if umount "$WS_LIBEXEC"; then
+    ws_log "overlay unmounted"
+  elif umount -l "$WS_LIBEXEC"; then
+    ws_log "WARN: the overlay was busy: detached it lazily"
+  else
+    ws_log "WARN: could not unmount the overlay on $WS_LIBEXEC"
+  fi
+fi
+
+# 4. xochitl, if we stopped it and it is not back. The panel is never waited on here: the app and its helpers
+#    are gone (step 2), and xochitl may already be active.
+restored=
+if ws_state_has STOPPED_XOCHITL && ! systemctl is-active --quiet xochitl; then
+  rm -f "$WS_EPD_LOCK"
+  ws_settle 2000000
+  # A 30 s timed lock covers xochitl's start, then the kernel drops it on its own; xochitl takes its own.
+  ws_wakelock "wifi-signin 30000000000" || ws_log "WARN: could not rewrite the wakelock"
+  restored=1
+  ws_log "starting xochitl"
+  systemctl reset-failed xochitl 2>/dev/null    # StartLimitBurst=4/600 s + OnFailure=emergency.target
+  systemctl start xochitl
+  if ! systemctl is-active --quiet xochitl; then
+    ws_log "WARN: xochitl is not active after its start: trying once more"
+    ws_settle 2000000
+    systemctl reset-failed xochitl 2>/dev/null
+    systemctl start xochitl
+    systemctl is-active --quiet xochitl || ws_log "ERROR: xochitl is still not active"
+  fi
+fi
+
+# 5. The 15 min wakelock, if step 4 did not replace it (xochitl was never stopped, or is already back): drop it.
+if ws_state_has WAKELOCK && [ -z "$restored" ]; then
+  ws_wakeunlock || ws_log "WARN: could not release the wakelock"
+fi
+
+# 6. tripletap, last: after xochitl's start has been verified (or reported). Started even if xochitl is not
+#    back, because its triple press (xovi/start) is then the owner's way to bring xochitl back.
+if ws_state_has TRIPLETAP; then
+  systemctl start xovi-tripletap || ws_log "WARN: could not start xovi-tripletap"
+fi
+
+# 7. The session is over. (No newer session can exist yet: appload-entry.sh refuses while the unit is still
+#    deactivating.)
+rm -rf "$WS_RUN"
+ws_log "cleanup done"
+exit 0

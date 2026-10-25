@@ -1,0 +1,8 @@
+{
+  "name": "Wi-Fi Sign-in",
+  "application": "/home/root/xovi/exthome/appload/wifi-signin/appload-entry.sh",
+  "workingDirectory": "/home/root/xovi/exthome/appload/wifi-signin",
+  "qtfb": false,
+  "disablesWindowedMode": true,
+  "aspectRatio": "original"
+}

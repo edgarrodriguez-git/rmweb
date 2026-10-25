@@ -22,7 +22,8 @@ done
 python3 -m unittest discover -s tools/fake-portal -p 'test_*.py' || { echo "FAIL (python): fake-portal"; fail=1; }
 # Optional lint of the shipped shell (skip cleanly if shellcheck isn't installed).
 if command -v shellcheck >/dev/null 2>&1; then
-  for f in device/rmweb device/rmweb-env.sh device/install.sh; do
+  for f in device/rmweb device/rmweb-env.sh device/install.sh device/wifi-signin/lib.sh \
+      device/wifi-signin/appload-entry.sh device/wifi-signin/launch device/wifi-signin/cleanup; do
     [ -e "$f" ] && { shellcheck -s sh "$f" || { echo "FAIL (shellcheck): $f"; fail=1; }; }
   done
 else
