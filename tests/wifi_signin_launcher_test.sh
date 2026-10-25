@@ -14,7 +14,8 @@
 #   - /proc/<pid>/{stat,cmdline,fd/} and /proc/{uptime,mounts} are plain files; mount and umount edit
 #     proc/mounts.
 #   - /sys/power/wake_lock and wake_unlock are symlinks to stub.log, so every write lands in order among the
-#     stub calls ("wifi-signin 900000000000", "wifi-signin 30000000000", or "wifi-signin" for an unlock).
+#     stub calls ("wifi-signin 900000000000", "wifi-signin-exit 30000000000", or "wifi-signin" for an unlock).
+#     locks_held_after replays them with the kernel's rule: a timed lock is only ever extended (R27).
 #   - Time: `sleep N` and `usleep N` move the fake boot clock (proc/uptime) by N seconds and really wait N/100
 #     (at least 10 ms), so the 30 s guard costs 0.3 s. A sleep of 1000 s or more only waits (really, N/100):
 #     every case sets WS_REFRESH_S=100000, which parks the 60 s wakelock refresher so it neither spins nor moves
@@ -318,9 +319,19 @@ common(){ # what every case requires
   done
   if grep -qv '^\[wifi-signin\] ' "$JOURNAL"; then fail "journal line without the [wifi-signin] prefix: $(grep -v '^\[wifi-signin\] ' "$JOURNAL" | head -n 2 | tr '\n' ';')"; fi
 }
+locks_held_after(){ # locks_held_after SECONDS: the wakelocks still held SECONDS after stub.log's writes, replayed
+  # with the kernel's rule (a timed lock is only ever extended, never shortened; an unlock drops it) as if all were
+  # written at one instant: their order is what matters
+  awk -v t="$1" '
+    $1 ~ /^wifi-signin(-exit)?$/ && NF == 2 && $2 ~ /^[0-9]+$/ { e = $2 / 1e9; if (!($1 in x) || e > x[$1]) x[$1] = e; next }
+    $0 ~ /^wifi-signin(-exit)?$/ { delete x[$0] }
+    END { for (n in x) if (x[n] > t) printf "%s ", n }' "$STUBLOG"
+}
 restored(){ # the end of every session that stopped xochitl
-  in_order "umount $LIBEXEC" "wifi-signin 30000000000" "systemctl reset-failed xochitl" "systemctl start xochitl" \
-    "systemctl start xovi-tripletap"
+  in_order "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl reset-failed xochitl" \
+    "systemctl start xochitl" "systemctl start xovi-tripletap"
+  local held; held=$(locks_held_after 40)
+  [ -z "$held" ] || fail "wakelocks still held 40 s after the session (spec acceptance test 4): $held"
 }
 MOUNT_LINE(){ echo "mount -t overlay overlay -o lowerdir=$LIBEXEC,upperdir=$RUN/ovl/upper,workdir=$RUN/ovl/work $LIBEXEC"; }
 
@@ -330,10 +341,10 @@ setup online
 run "$APP/launch"
 rc_is 20
 in_order "wifi-signin 900000000000" "systemctl stop xovi-tripletap" "systemctl stop xochitl" "$(MOUNT_LINE)" "app run" \
-  "umount $LIBEXEC" "wifi-signin 30000000000" "systemctl reset-failed xochitl" "systemctl start xochitl" \
-  "systemctl start xovi-tripletap"
+  "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl reset-failed xochitl" \
+  "systemctl start xochitl" "systemctl start xovi-tripletap"
 gone; jwant "[wifi-signin] exit 20 (online)"; common
-nowant "wifi-signin"                              # no unlock: the 30 s timed lock replaces the 15 min one
+count_is "wifi-signin" 1                          # R27: the 15 min lock is dropped once, after the 30 s exit lock
 nowant_re "ActiveEnterTimestamp"                  # the guard never uses the monotonic clock
 want "xochitl stopped at age 990 (pid 4242)"
 count_is "app run" 1
@@ -343,6 +354,21 @@ for kv in "RMWEB_KIOSK=captive" "RMWEB_PROFILE=$RUN/profile" "RMWEB_COOKIES=0" "
   grep -qxF -- "$kv" "$T/app.env" 2>/dev/null || fail "app environment lacks $kv"
 done
 grep -qx WPEWebProcess "$T/app.upper" 2>/dev/null || fail "the runtime's WPE helpers were not copied into the overlay upper dir"
+
+setup exit_lock_replaces_the_session_lock
+# R27: the kernel only ever extends a timed wakelock, so a 30 s rewrite of "wifi-signin" cannot shorten the 15 min
+# lock. On the normal exit-20 path cleanup takes "wifi-signin-exit" for 30 s FIRST (autosleep never gets a gap),
+# then unlocks "wifi-signin", and nothing writes the long lock again.
+run "$APP/launch"
+rc_is 20
+in_order "wifi-signin 900000000000" "app run" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl start xochitl"
+count_is "wifi-signin" 1; count_is "wifi-signin-exit 30000000000" 1
+awk '$0 == "wifi-signin" { u = 1 } u && $0 == "wifi-signin 900000000000" { bad = 1 } END { exit bad }' "$STUBLOG" ||
+  fail "the 15 min lock was written again after its unlock"
+[ "$(locks_held_after 0)" = "wifi-signin-exit " ] ||
+  fail "held as xochitl starts: '$(locks_held_after 0)', want only wifi-signin-exit"
+[ -z "$(locks_held_after 40)" ] || fail "held 40 s after the session: $(locks_held_after 40)"
+gone; common
 
 # Case 2: every exit code is logged with exitMeaning's string (engine/wpeqt/captive/exit_codes.h).
 for kv in "20:online" "21:cancelled" "22:idle timeout" "23:no network" "24:use network as is" "0:SIGTERM drain" \
@@ -377,8 +403,8 @@ start_bg "$APP/launch"
 if wait_ready; then kill -TERM "$LPID"; fi
 wait_bg 20
 rc_is 0                                           # the app's own code: its TERM handler drains, exits 0
-in_order "app run" "app TERM" "umount $LIBEXEC" "wifi-signin 30000000000" "systemctl reset-failed xochitl" \
-  "systemctl start xochitl" "systemctl start xovi-tripletap"
+in_order "app run" "app TERM" "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" \
+  "systemctl reset-failed xochitl" "systemctl start xochitl" "systemctl start xovi-tripletap"
 jwant "caught SIGTERM"; jwant "[wifi-signin] exit 0 (SIGTERM drain)"; gone; common
 
 setup hup_mid_run
@@ -403,7 +429,7 @@ grep -q '^APP=[0-9][0-9]*$' "$RUN/state" 2>/dev/null || fail "state lacks APP=<p
 nowant "systemctl start xochitl"
 ENVX=(); run "$APP/cleanup" post
 rc_is 0
-in_order "app TERM" "umount $LIBEXEC" "wifi-signin 30000000000" "systemctl reset-failed xochitl" \
+in_order "app TERM" "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl reset-failed xochitl" \
   "systemctl start xochitl" "systemctl start xovi-tripletap"
 jwant "cleanup (post)"; gone; common
 
@@ -480,8 +506,8 @@ mkdir -p "$PROC/777/fd"; ln -s "$CARD" "$PROC/777/fd/3"
 run "$APP/launch"
 rc_is 12
 nowant "app run"; nowant_re "^mount "
-in_order "systemctl stop xochitl" "wifi-signin 30000000000" "systemctl reset-failed xochitl" "systemctl start xochitl" \
-  "systemctl start xovi-tripletap"
+in_order "systemctl stop xochitl" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl reset-failed xochitl" \
+  "systemctl start xochitl" "systemctl start xovi-tripletap"
 jwant "pid 777"; jwant "[wifi-signin] exit 12 (display busy)"; gone; common
 
 setup card_released_during_wait_launches
@@ -584,8 +610,8 @@ run "$APP/launch"
 rc_is 20
 want "systemctl is-active --quiet xovi-tripletap"
 nowant "systemctl stop xovi-tripletap"; nowant "systemctl start xovi-tripletap"
-in_order "systemctl stop xochitl" "app run" "umount $LIBEXEC" "wifi-signin 30000000000" "systemctl reset-failed xochitl" \
-  "systemctl start xochitl"
+in_order "systemctl stop xochitl" "app run" "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" \
+  "systemctl reset-failed xochitl" "systemctl start xochitl"
 gone; common
 
 setup cleanup_twice_noop
@@ -662,8 +688,9 @@ setup xochitl_start_retried_once
 echo 1 > "$T/units/xochitl.startfail"
 run "$APP/launch"
 rc_is 20
-in_order "app run" "umount $LIBEXEC" "wifi-signin 30000000000" "systemctl reset-failed xochitl" "systemctl start xochitl" \
-  "usleep 2000000" "systemctl reset-failed xochitl" "systemctl start xochitl" "systemctl start xovi-tripletap"
+in_order "app run" "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl reset-failed xochitl" \
+  "systemctl start xochitl" "usleep 2000000" "systemctl reset-failed xochitl" "systemctl start xochitl" \
+  "systemctl start xovi-tripletap"
 count_is "systemctl start xochitl" 2; jwant "WARN"; gone; common
 
 setup helpers_killed_before_xochitl_returns
@@ -679,15 +706,16 @@ setup umount_only_our_overlay
 : > "$T/mount.foreign"                            # proc/mounts shows another upperdir on /usr/libexec
 run "$APP/launch"
 rc_is 20
-nowant "umount $LIBEXEC"; in_order "app run" "wifi-signin 30000000000" "systemctl start xochitl"; gone; common
+nowant "umount $LIBEXEC"; in_order "app run" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl start xochitl"
+gone; common
 
 setup mount_fails_restores
 : > "$T/mount.fail"
 run "$APP/launch"
 rc_is 12
 nowant "app run"; nowant "umount $LIBEXEC"
-in_order "systemctl stop xochitl" "$(MOUNT_LINE)" "wifi-signin 30000000000" "systemctl reset-failed xochitl" \
-  "systemctl start xochitl" "systemctl start xovi-tripletap"
+in_order "systemctl stop xochitl" "$(MOUNT_LINE)" "wifi-signin-exit 30000000000" "wifi-signin" \
+  "systemctl reset-failed xochitl" "systemctl start xochitl" "systemctl start xovi-tripletap"
 jwant "overlay"; jwant "[wifi-signin] exit 12 (display busy)"; gone; common
 
 setup refresher_rewrites_and_stops
@@ -696,8 +724,8 @@ run "$APP/launch"
 rc_is 20
 n=$(count "wifi-signin 900000000000")
 [ "$n" -ge 3 ] || fail "the wakelock was written $n times, want the first write plus refreshes"
-[ "$(grep '^wifi-signin' "$STUBLOG" | tail -n 1)" = "wifi-signin 30000000000" ] ||
-  fail "the refresher wrote after cleanup's 30 s lock: $(grep '^wifi-signin' "$STUBLOG" | tail -n 2 | tr '\n' ';')"
+[ "$(grep '^wifi-signin' "$STUBLOG" | tail -n 2 | tr '\n' ';')" = "wifi-signin-exit 30000000000;wifi-signin;" ] ||
+  fail "the refresher wrote after cleanup's exit lock and unlock: $(grep '^wifi-signin' "$STUBLOG" | tail -n 3 | tr '\n' ';')"
 restored; gone; common
 
 setup wait_for_deadline_with_slow_checks
@@ -763,8 +791,8 @@ else
     echo inactive > "$T/units/xovi-tripletap.state"
     run "$APP/cleanup" post
     rc_is 0
-    in_order "umount $LIBEXEC" "wifi-signin 30000000000" "systemctl reset-failed xochitl" "systemctl start xochitl" \
-      "systemctl start xovi-tripletap"
+    in_order "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl reset-failed xochitl" \
+      "systemctl start xochitl" "systemctl start xovi-tripletap"
     at="$(sed -n 's/^clock at umount: //p' "$STUBLOG" | head -n 1)"
     awk -v t="$at" 'BEGIN { exit !(t != "" && t - 1000 <= 20.2) }' ||
       fail "cleanup step 2 took $(awk -v t="$at" 'BEGIN { print t - 1000 }') s on the fake clock, want at most 20 (+ one 0.2 s poll)"

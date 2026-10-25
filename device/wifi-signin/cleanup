@@ -88,8 +88,14 @@ restored=
 if ws_state_has STOPPED_XOCHITL && ! systemctl is-active --quiet xochitl; then
   rm -f "$WS_EPD_LOCK"
   ws_settle 2000000
-  # A 30 s timed lock covers xochitl's start, then the kernel drops it on its own; xochitl takes its own.
-  ws_wakelock "wifi-signin 30000000000" || ws_log "WARN: could not rewrite the wakelock"
+  # A 30 s timed lock covers xochitl's start, then the kernel drops it on its own; xochitl takes its own. The
+  # kernel never shortens a timed lock, so it has its own name, and the 15 min one is dropped only once the short
+  # one is held: autosleep never gets a gap (R27).
+  if ws_wakelock "wifi-signin-exit 30000000000"; then
+    ws_wakeunlock wifi-signin || ws_log "WARN: could not release the wakelock"
+  else
+    ws_log "WARN: could not take the exit wakelock: keeping the 15 min one, which expires on its own"
+  fi
   restored=1
   ws_log "starting xochitl"
   systemctl reset-failed xochitl 2>/dev/null    # StartLimitBurst=4/600 s + OnFailure=emergency.target
@@ -103,9 +109,9 @@ if ws_state_has STOPPED_XOCHITL && ! systemctl is-active --quiet xochitl; then
   fi
 fi
 
-# 5. The 15 min wakelock, if step 4 did not replace it (xochitl was never stopped, or is already back): drop it.
+# 5. The 15 min wakelock, if step 4 did not handle it (xochitl was never stopped, or is already back): drop it.
 if ws_state_has WAKELOCK && [ -z "$restored" ]; then
-  ws_wakeunlock || ws_log "WARN: could not release the wakelock"
+  ws_wakeunlock wifi-signin || ws_log "WARN: could not release the wakelock"
 fi
 
 # 6. tripletap, last: after xochitl's start has been verified (or reported). Started even if xochitl is not

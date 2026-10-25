@@ -156,8 +156,9 @@ ws_exit_meaning() {
   esac
 }
 
-# ws_wakelock SPEC / ws_wakeunlock: the kernel's wakelock interface ("name timeout_ns" holds a timed lock).
-# Appends rather than truncates: on sysfs that is the same write (the store ignores the offset), and it lets the
-# host tests log every write in order.
+# ws_wakelock SPEC / ws_wakeunlock NAME: the kernel's wakelock interface ("name timeout_ns" holds a timed lock;
+# the kernel only ever extends its timeout, so a shorter one needs another name). Appends rather than truncates:
+# on sysfs that is the same write (the store ignores the offset), and it lets the host tests log every write in
+# order.
 ws_wakelock() { { printf '%s\n' "$1" >> "$WS_SYSPOWER/wake_lock"; } 2>/dev/null; }
-ws_wakeunlock() { { printf '%s\n' wifi-signin >> "$WS_SYSPOWER/wake_unlock"; } 2>/dev/null; }
+ws_wakeunlock() { { printf '%s\n' "$1" >> "$WS_SYSPOWER/wake_unlock"; } 2>/dev/null; }
