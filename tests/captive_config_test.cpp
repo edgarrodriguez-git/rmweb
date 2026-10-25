@@ -198,6 +198,27 @@ static void lastLineWithoutNewline() {
     CHECK(c.aUrl == "http://x/a");
 }
 
+// parse: a leading UTF-8 byte-order mark (some editors write one) is skipped, so the first key still counts.
+static void leadingUtf8BomIsSkipped() {
+    const CaptiveConfig c = parseCaptiveConfig("\xEF\xBB\xBFprobe_google = http://10.11.99.2:8080/generate_204\n");
+    CHECK(c.gUrl == "http://10.11.99.2:8080/generate_204");
+    CHECK(c.overridden);
+    const CaptiveConfig d = parseCaptiveConfig("\xEF\xBB\xBFidle_timeout_s = 5\r\nconfirm = https://x/c\r\n");
+    CHECK(d.idleTimeoutS == 5);
+    CHECK(d.confirmUrl == "https://x/c");
+    const CaptiveConfig e = parseCaptiveConfig("\xEF\xBB\xBF");          // a BOM alone is an empty file
+    CHECK(!e.overridden);
+    CHECK(e.gUrl == "http://connectivitycheck.gstatic.com/generate_204");
+    const CaptiveConfig f = parseCaptiveConfig("\xEF\xBB\xBF# comment\nprobe_apple = http://x/a\n");
+    CHECK(f.aUrl == "http://x/a");
+    // only a LEADING mark is skipped: one before a later key leaves that key unknown
+    const CaptiveConfig g = parseCaptiveConfig("probe_apple = http://x/a\n\xEF\xBB\xBF" "confirm = https://x/c\n");
+    CHECK(g.aUrl == "http://x/a");
+    CHECK(g.confirmUrl == "https://www.google.com/generate_204");
+    // a truncated mark is not one
+    CHECK(!parseCaptiveConfig("\xEF\xBBprobe_google = http://x/g\n").overridden);
+}
+
 // env: exactly "captive" — no case folding, no trimming.
 static void captiveModeFromEnvIsStrict() {
     CHECK(!captiveModeFromEnv("captive "));
@@ -354,6 +375,7 @@ int main() {
     idleTimeoutParsing();
     lastAssignmentWins();
     lastLineWithoutNewline();
+    leadingUtf8BomIsSkipped();
     captiveModeFromEnvIsStrict();
     stripCaptiveFlagCompactsAndTerminates();
     exitCodeConstants();

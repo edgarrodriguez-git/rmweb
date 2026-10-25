@@ -3,6 +3,7 @@
 //
 //  1. parseCaptiveConfig(): the OPTIONAL override file that tests use to point the probes at a fake portal
 //     (tools/fake-portal). Real devices have no such file and get the defaults below. Format, one `key = value` per line:
+//       - a leading UTF-8 byte-order mark (EF BB BF, written by some editors) is skipped; one anywhere else is text;
 //       - a `#` anywhere on a line starts a comment (it also cuts a value, so a URL fragment cannot be written here);
 //       - the line is split on the FIRST `=`, so a value may itself contain `=` (query strings);
 //       - whitespace around the key and around the value is trimmed (spaces, tabs, CR — CRLF files work);
@@ -61,7 +62,7 @@ inline bool parsePositiveInt(const std::string& s, int& out) {
 
 inline CaptiveConfig parseCaptiveConfig(const std::string& text) {
     CaptiveConfig cfg;
-    std::string::size_type pos = 0;
+    std::string::size_type pos = text.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;   // skip a leading UTF-8 BOM
     while (pos <= text.size()) {
         std::string::size_type nl = text.find('\n', pos);
         if (nl == std::string::npos) nl = text.size();
