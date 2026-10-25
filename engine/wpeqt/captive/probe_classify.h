@@ -238,7 +238,15 @@ inline CycleOutcome combineCycle(bool hasDefaultRoute, const ProbeVerdict& g, co
     return o;
 }
 
-struct CycleReport { CycleOutcome outcome; std::string gAddress, aAddress; bool dateKnown = false; long long skewSec = 0; };
+// gAddress / aAddress / confirmAddress: the peer address each probe's connection reached ("" if it never connected or,
+// for the confirmation, was never sent). confirmAddress is last so existing aggregate initializers keep their meaning.
+struct CycleReport {
+    CycleOutcome outcome;
+    std::string gAddress, aAddress;
+    bool dateKnown = false;
+    long long skewSec = 0;
+    std::string confirmAddress;
+};
 
 // Does /proc/net/route text hold a default route (Destination 00000000) for `iface`? Columns are whitespace-
 // separated: Iface Destination Gateway ... The header row never matches (its Destination column is a word).

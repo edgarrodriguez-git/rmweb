@@ -153,6 +153,16 @@ int main() {
         CHECK(combineCycle(false, ok, okA, TlsConfirm::Ok204).viewUrl.empty());
     }
 
+    // CycleReport: the confirmation's peer address (R33) is the last member, after the fields existing code sets
+    {
+        const CycleReport none;
+        CHECK(none.gAddress.empty() && none.aAddress.empty() && none.confirmAddress.empty());
+        CHECK(!none.dateKnown && none.skewSec == 0);
+        const CycleReport full{CycleOutcome{}, "10.0.0.1", "10.0.0.2", true, 7, "10.0.0.3"};
+        CHECK(full.gAddress == "10.0.0.1" && full.aAddress == "10.0.0.2" && full.dateKnown && full.skewSec == 7);
+        CHECK(full.confirmAddress == "10.0.0.3");
+    }
+
     // hasDefaultRoute
     CHECK(!hasDefaultRoute("Iface\tDestination\tGateway\neth0\t00000000\t0101A8C0\n", "wlan0"));              // default is on another iface
     CHECK(!hasDefaultRoute("Iface\tDestination\tGateway\nwlan01\t00000000\t0101A8C0\n", "wlan0"));            // whole-name match

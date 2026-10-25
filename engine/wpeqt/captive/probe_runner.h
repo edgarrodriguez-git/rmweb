@@ -22,8 +22,8 @@
 //    OtherFailure, i.e. Partial when the HTTP probes pass (a mistyped `confirm = http://…` override shows Partial);
 //  - a certificate the TLS backend rejects is refused in `accept-certificate`, and its GTlsCertificateFlags are
 //    kept, so it reports transportOk = false plus the flags (never transportOk = true with flags);
-//  - gAddress / aAddress: the peer address of the probe's connection (`network-event`, G_SOCKET_CLIENT_CONNECTED),
-//    empty when it never connected;
+//  - gAddress / aAddress / confirmAddress: the peer address of the probe's (or the confirmation's) connection
+//    (`network-event`, G_SOCKET_CLIENT_CONNECTED), empty when it never connected or the confirmation was not sent;
 //  - clock skew comes ONLY from a 204 answer to G (design §5): dateKnown = true and skewSec = G's Date header minus
 //    the device clock (time(nullptr)) when that reply arrived — a server ahead of the device gives a positive value —
 //    only when G answered 204 with a Date that parses (IMF-fixdate). Every other case (a captive 302, a 200 or 511
@@ -338,6 +338,7 @@ private:
         report.outcome = combineCycle(c->route, c->gv, c->av, confirm);
         report.gAddress = c->g.address;
         report.aAddress = c->a.address;
+        report.confirmAddress = c->confirm.address;
         if (c->g.reply.transportOk && c->g.reply.status == 204) {   // only a real 204 from G carries the clock
             const long long serverEpoch = parseHttpDate(c->g.date);
             if (serverEpoch >= 0) {
