@@ -46,9 +46,13 @@ struct Harness {
 
     std::function<void(const CycleReport&)> pendingDone;  // the in-flight cycle's completion
     std::vector<int64_t> cycleStarts;                     // clock time of every runCycle call
-    bool overlap = false;                                 // runCycle while a cycle was still in flight
+    bool overlap = false;                                 // runCycle while a cycle was still in flight (or answering)
     int autoCompleteMs = -1;                              // >= 0: every cycle answers autoReport this long after it starts
     CycleReport autoReport;
+    bool syncComplete = false;                            // every cycle answers syncReport from INSIDE runCycle
+    CycleReport syncReport;
+    int runCycleDepth = 0;                                // runCycle calls still on the stack (syncComplete only)
+    std::function<void(const std::string&)> onNavigate;   // runs inside navigate(), after it is recorded
 
     std::vector<std::string> navs;
     std::vector<Screen> screens;
@@ -68,9 +72,15 @@ struct Harness {
             timers.push_back({now + delayMs, nextSeq++, std::move(fn)});
         };
         h.runCycle = [this](std::function<void(const CycleReport&)> done) {
-            if (pendingDone) overlap = true;
+            if (pendingDone || runCycleDepth > 0) overlap = true;
             cycleStarts.push_back(now);
             events.push_back("cycle");
+            if (syncComplete) {
+                ++runCycleDepth;
+                done(syncReport);
+                --runCycleDepth;
+                return;
+            }
             pendingDone = std::move(done);
             if (autoCompleteMs >= 0)
                 timers.push_back({now + autoCompleteMs, nextSeq++, [this] { if (pendingDone) complete(autoReport); }});
@@ -79,6 +89,7 @@ struct Harness {
             navs.push_back(url);
             events.push_back("nav:" + url);
             armedAtNavigate.push_back(ctl && ctl->scheduler().dueAtMs() != kNever);
+            if (onNavigate) onNavigate(url);
         };
         h.showScreen = [this](Screen s) { screens.push_back(s); events.push_back(std::string("screen:") + screenName(s)); };
         h.setStatus = [this](const std::string& t) { statuses.push_back(t); events.push_back("status:" + t); };
@@ -1250,6 +1261,193 @@ static void host_and_url_keys() {
     CHECK(ctlUrlKey("http://h.test/a") != ctlUrlKey("https://h.test/a"));
 }
 
+// ===================================================================================================================
+// Regression pins (final review): these pass against the code as it was; they keep it that way
+// ===================================================================================================================
+
+// A runCycle hook that answers synchronously, from inside runCycle (the hook contract says "later"; a host that breaks
+// it must still not break the controller): no overlapping or nested cycle, and the scheduler stays consistent.
+static void synchronous_cycle_done_keeps_scheduler_consistent() {
+    {   // start-up Captive, then a storm of load ends whose cycles all answer synchronously
+        Harness h;
+        h.syncComplete = true;
+        h.syncReport = captive(kG, kPortal);
+        h.ctl->start();
+        CHECK(h.cycleStarts == std::vector<int64_t>{0});
+        CHECK(h.navs == std::vector<std::string>{kG});
+        CHECK(h.ctl->scheduler().dueAtMs() == 10000);  // armed at 0: idle re-probe 10 s later
+        for (int64_t t = 500; t <= 60000; t += 500) {
+            h.advanceTo(t);
+            h.ctl->onLoadEnd(kPortal);
+        }
+        CHECK(!h.overlap);
+        for (size_t i = 1; i < h.cycleStarts.size(); ++i) CHECK(h.cycleStarts[i] - h.cycleStarts[i - 1] >= 3000);
+        CHECK(h.cycleStarts.size() == 21);         // 0, then 3000, 6000, ... 60000 (the 60000 one from the tick)
+        CHECK(h.cycleStarts.back() == 60000);
+        CHECK(schedulerIdle(*h.ctl, h.now));       // every scheduled cycle ended with cycleFinished
+        CHECK(h.ctl->scheduler().dueAtMs() == 63000);   // the load end just after that start waits out the gap
+        h.advanceTo(63000);
+        CHECK(h.cycleStarts.size() == 22 && h.cycleStarts.back() == 63000);
+        CHECK(h.ctl->scheduler().dueAtMs() == 73000);   // then the idle re-probe, 10 s after that (instant) cycle
+        h.advanceTo(73000);
+        CHECK(h.cycleStarts.size() == 23 && h.cycleStarts.back() == 73000);
+        h.syncReport = report(CycleResult::Online);
+        h.advanceTo(76000);
+        h.ctl->onLoadEnd(kPortal);
+        CHECK(h.cycleStarts.size() == 24);
+        CHECK(h.screens == (std::vector<Screen>{Screen::None, Screen::Connected}));
+        h.advanceTo(78000);
+        CHECK(h.exits == std::vector<int>{kExitOnline});
+        CHECK(!h.overlap);
+        CHECK(h.navs == std::vector<std::string>{kG});
+    }
+    {   // a start-up screen, then a Retry answered synchronously
+        Harness h;
+        h.syncComplete = true;
+        h.syncReport = report(CycleResult::Limited);
+        h.ctl->start();
+        CHECK(h.screens == std::vector<Screen>{Screen::Limited});
+        h.syncReport = captive(kA, kPortal);
+        h.advanceTo(1000);
+        h.ctl->onButton(Button::Retry);
+        CHECK(h.cycleStarts == (std::vector<int64_t>{0, 1000}));
+        CHECK(h.navs == std::vector<std::string>{kA});
+        CHECK(h.ctl->scheduler().dueAtMs() == 11000);
+        h.advanceTo(3500);
+        h.ctl->onLoadEnd(kA);                      // the fallback fires once; the load end's cycle waits for the gap
+        CHECK(h.navs == (std::vector<std::string>{kA, kPortal}));
+        CHECK(h.cycleStarts.size() == 2);
+        h.advanceTo(4000);                         // 3 s after the Retry cycle started: the tick starts it
+        CHECK(h.cycleStarts.size() == 3 && h.cycleStarts.back() == 4000);
+        CHECK(!h.overlap);
+        CHECK(schedulerIdle(*h.ctl, h.now));
+    }
+}
+
+// An IPv6 probe host ("[::1]:18080") through every host comparison: the fallback's exact-URL match, the current host
+// learned from load ends, and a ProbeHostNav return.
+static void ipv6_probe_host() {
+    const CaptiveConfig cfg = parseCaptiveConfig("probe_google = http://[::1]:18080/generate_204\n"
+                                                 "probe_apple = http://[::1]:18081/hotspot-detect.html\n");
+    const std::string portal = "http://[::1]:18082/portal/login";
+    CHECK(cfg.gUrl == "http://[::1]:18080/generate_204");
+    Harness h(cfg);
+    showPortal(h, cfg.gUrl, portal);
+    CHECK(h.navs == std::vector<std::string>{cfg.gUrl});
+    h.advanceTo(400);
+    h.ctl->onNavigationDecision(cfg.gUrl);         // the view is not on a host yet: a PageEvent
+    h.ctl->onLoadEnd("http://[::1]:18080/generate_204#top");   // stayed on the probe URL (fragment ignored): fallback
+    CHECK(h.navs == (std::vector<std::string>{cfg.gUrl, portal}));
+    CHECK(h.cycleStarts.size() == 1);              // still inside the start-up gap
+    h.advanceTo(3100);
+    CHECK(h.cycleStarts.size() == 2);              // the deferred page events, on the first tick after 3000
+    h.completeAt(3200, captive(cfg.gUrl, portal));
+    h.advanceTo(4000);
+    h.ctl->onLoadEnd(portal);                      // same address, another port: the portal's host, not a probe host
+    h.advanceTo(4500);
+    h.ctl->onNavigationDecision("http://[::1]:18083/x");   // neither a probe host: a PageEvent (gap until 6100)
+    CHECK(h.cycleStarts.size() == 2);
+    h.advanceTo(5000);
+    h.ctl->onNavigationDecision("http://[::1]:18081/hotspot-detect.html");   // back to probe host A: a return
+    CHECK(h.cycleStarts.size() == 3);
+    CHECK(h.cycleStarts.back() == 5000);           // immediate, inside the 3 s gap
+    h.completeAt(5100, captive(cfg.gUrl, portal));
+    h.advanceTo(5500);
+    h.ctl->onNavigationDecision("http://[::1]:18080/generate_204");   // no load end since that return: a PageEvent
+    CHECK(h.cycleStarts.size() == 3);
+    h.advanceTo(8100);
+    CHECK(h.cycleStarts.size() == 4);
+    CHECK(h.cycleStarts.back() == 8100);           // deferred to the gap's end (8000), started on the next tick
+    CHECK(h.navs == (std::vector<std::string>{cfg.gUrl, portal}));
+    CHECK(!h.overlap);
+}
+
+// A navigate hook that re-enters the controller while the fallback navigates from inside onLoadEnd (WebKit may run
+// decide-policy, or end a load, synchronously inside load_uri): the fallback fires once and at most one cycle starts.
+static void reentrant_navigate_during_fallback() {
+    {   // navigate -> onNavigationDecision
+        Harness h;
+        showPortal(h, kG, kPortal);
+        int reentered = 0;
+        h.onNavigate = [&h, &reentered](const std::string& url) { ++reentered; h.ctl->onNavigationDecision(url); };
+        h.advanceTo(3500);                         // past the start-up gap: a page event may start a cycle at once
+        h.ctl->onLoadEnd(kG);                      // the view stayed on the probe URL: the fallback navigates, re-entering
+        CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
+        CHECK(reentered == 1);
+        CHECK(h.cycleStarts == (std::vector<int64_t>{0, 3500}));   // one cycle for the load end and the decision
+        h.ctl->onLoadEnd(kG);                      // the fallback is spent: no second navigate
+        CHECK(h.navs.size() == 2 && reentered == 1);
+        h.completeAt(3600, captive(kG, kPortal));
+        CHECK(!h.overlap);
+        CHECK(schedulerIdle(*h.ctl, h.now));
+        h.advanceTo(6600);
+        CHECK(h.cycleStarts.size() == 3);          // the load end at 3500 after the cycle start waited out the gap
+    }
+    {   // navigate -> onNavigationDecision -> onLoadEnd (a host that ends the new load at once)
+        Harness h;
+        showPortal(h, kG, kPortal);
+        int reentered = 0;
+        h.onNavigate = [&h, &reentered](const std::string& url) {
+            ++reentered;
+            h.ctl->onNavigationDecision(url);
+            h.ctl->onLoadEnd(url);
+        };
+        h.advanceTo(3500);
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
+        CHECK(reentered == 1);                     // the re-entrant load end does not fall back again
+        CHECK(h.cycleStarts == (std::vector<int64_t>{0, 3500}));
+        CHECK(!h.overlap);
+    }
+    {   // re-entering already during the start-up navigate(viewUrl): the scheduler is armed only after it returns
+        Harness h;
+        h.onNavigate = [&h](const std::string& url) { h.ctl->onNavigationDecision(url); };
+        showPortal(h, kG, kPortal);
+        CHECK(h.navs == std::vector<std::string>{kG});
+        CHECK(h.cycleStarts.size() == 1);
+        CHECK(h.ctl->scheduler().dueAtMs() == 10100);   // the early decision was not queued
+        h.advanceTo(400);
+        h.ctl->onLoadEnd(kG);
+        CHECK(h.navs == (std::vector<std::string>{kG, kPortal}));
+        CHECK(!h.overlap);
+    }
+}
+
+// idle_timeout_s = INT_MAX, the largest value parseCaptiveConfig accepts: the deadline (INT_MAX s) is far beyond what
+// `after` takes, so the watchdog's delay is clamped to INT_MAX ms and it re-arms until the deadline really comes.
+static void idle_timeout_int_max_clamps_and_rearms() {
+    const CaptiveConfig cfg = parseCaptiveConfig("idle_timeout_s = 2147483647\n");
+    CHECK(cfg.idleTimeoutS == std::numeric_limits<int>::max());
+    const int kMax = std::numeric_limits<int>::max();
+    const int64_t deadline = static_cast<int64_t>(kMax) * 1000;
+    {   // a start-up screen: the watchdog is the only timer
+        Harness h(cfg);
+        h.ctl->start();
+        CHECK(h.afterDelays == std::vector<int>{kMax});
+        h.completeAt(100, report(CycleResult::Limited));
+        h.advanceTo(kMax);                         // first expiry: not idle yet, so it re-arms, clamped again
+        CHECK(h.exits.empty());
+        CHECK(h.afterDelays == (std::vector<int>{kMax, kMax}));
+        h.advanceTo(deadline - 1);
+        CHECK(h.exits.empty());
+        CHECK(h.afterDelays.size() == 1000);       // INT_MAX * 1000 ms is exactly 1000 clamped steps
+        CHECK(std::all_of(h.afterDelays.begin(), h.afterDelays.end(), [](int d) { return d == std::numeric_limits<int>::max(); }));
+        h.advanceTo(deadline);
+        CHECK(h.exits == std::vector<int>{kExitIdle});
+        CHECK(h.exitTimes == std::vector<int64_t>{deadline});
+        CHECK(h.timers.empty());
+    }
+    {   // portal shown: the same clamped watchdog runs beside the 500 ms tick
+        Harness h(cfg);
+        showPortal(h);
+        CHECK(!h.afterDelays.empty() && h.afterDelays.front() == kMax);
+        h.ctl->onUserActivity();
+        h.advanceTo(30000);
+        CHECK(h.exits.empty());
+        for (int d : h.afterDelays) CHECK(d >= 0);
+    }
+}
+
 int main() {
     startup_online_exits_20_after_2s();
     startup_clock_wrong_exits_20_after_3s();
@@ -1299,6 +1497,11 @@ int main() {
     destroyed_controller_ignores_late_callbacks();
     screen_text_and_buttons_match_spec();
     host_and_url_keys();
+
+    synchronous_cycle_done_keeps_scheduler_consistent();
+    ipv6_probe_host();
+    reentrant_navigate_during_fallback();
+    idle_timeout_int_max_clamps_and_rearms();
 
     if (fails == 0) std::printf("captive_controller_test: OK\n");
     return fails ? 1 : 0;
