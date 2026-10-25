@@ -646,6 +646,11 @@ public:
 
 ### Task 10: Toolchain on the 3.28 SDK, fast build, vendored app-SDK headers
 
+**Carry-forward from Part A (2026-10-25):**
+- Before step 2, check whether a 3.29 SDK exists under `remarkable-codex-toolchain/3.29.*` and prefer it (the Paper Pro runs 3.29); Task 17's `image()` must match the choice. (ledger: R6)
+- Before step 1, run `brew install ninja librsvg colima docker docker-buildx`: Task 1 installed only what Part A needed, and Task 12's icon needs `rsvg-convert`. (ledger: R2)
+- `fast-build.sh` and `gen-app-sdk.incontainer.sh` are the first rmbrowser ports: add rmbrowser's copyright line from its LICENSE to `NOTICE`, and move the Wi-Fi Sign-in section above NOTICE's closing disclaimer. (ledger: Task 1 minor (deferred))
+
 **Files:**
 - Modify: `scripts/fetch-sdk.sh` (the URL becomes `https://storage.googleapis.com/remarkable-codex-toolchain/3.28.0.172/remarkable-production-image-5.8.203-ferrari-public-aarch64-toolchain.sh`, plus its SHA256), `toolchain/Dockerfile` and `toolchain/README.md` (the SDK file name becomes 5.8.203), `engine/wpeqt/CMakeLists.txt` (add `libsoup-3.0 gio-2.0` to `pkg_check_modules(WPE ...)`)
 - Create (ported from rmbrowser, MIT): `scripts/fast-build.sh`, `engine/gen-app-sdk.incontainer.sh`
@@ -671,6 +676,15 @@ public:
 - [ ] **Step 6: Commit.** Message: `build: 3.28 SDK toolchain, fast build and vendored app SDK`.
 
 ### Task 11: Phase 0 on the Paper Pro (device, owner present)
+
+**Carry-forward from Part A (2026-10-25):**
+- The Paper Pro is on 3.29: the Prerequisite now allows 3.28.x or 3.29.x. Step 3 must pass on 3.29 before Task 12; if it fails, stop: a downgrade via reManager's OS Manager is the owner's call. (ledger: R6)
+- `device-facts.sh` also reports `sh` (`readlink -f /bin/sh`, BusyBox ash expected) and `sleep_fraction` (`sleep 0.2` exits 0 in under 1 s): `ws_settle` falls back from `usleep` to a fractional sleep. (ledger: Task 9 'resolved by controller')
+- It also reports `card0_link`: whether xochitl holds the panel, and that fd's target, which must be exactly `/dev/dri/card0` (`ws_card_holder` compares it whole). (ledger: Task 9 'resolved by controller')
+- It also reports `epd_lock_with_xochitl`: whether `/tmp/epframebuffer.lock` exists while xochitl runs; acceptance test 4 expects it absent after cleanup restarts xochitl. (ledger: final review spec-alignment declinedToJudge#15)
+- Step 5 also records the exit code and run time: the launcher retries only a run that ended within 20 s, with a code other than 0, 20-24 or 63 and a marker in stderr. (ledger: R23)
+- Write the `wake_lock_timed` probe with `>>`, as `ws_wakelock` does. (ledger: Task 9 'resolved by controller')
+- Add `wake_lock_extend_only`: write `ws-probe 60000000000`, then `ws-probe 2000000000`; after 3 s it must still be listed (a rewrite never shortens a timed lock); then unlock `ws-probe`. (ledger: R27)
 
 **Prerequisite:** the Paper Pro is on 3.28.x, automatic updates are off in reManager, Developer Mode is on, and USB is connected.
 
@@ -703,6 +717,19 @@ public:
 - [ ] **Step 6: Commit.** Message: `docs: phase 0 results for Paper Pro`.
 
 ### Task 12: Dev deploy and the launcher on the device with the upstream binary
+
+**Carry-forward from Part A (2026-10-25):**
+- Time step 4's cleanups: `cleanup (post|trap): undoing` to `cleanup done` must stay under 30 s (stop-post gets a fresh TimeoutStopSec; the host worst case starts xochitl at about 22.6 s). Record xochitl's start latency. (ledger: Task 9 'resolved by controller')
+- Identify processes by `/proc/PID/exe` (one `ls -l` pass) or `comm`, not `cmdline`, whose read takes the target's mmap_lock: update `ws_app_alive`, `ws_helper_pids` and the fake /proc; check helper exe paths via the overlay. (ledger: Task 9 POINTER for Task 12)
+- A D-state app that survives FINAL_SIGKILL lets `--collect` drop the failed unit, so `appload-entry.sh` would start a session over it: decide whether it also refuses while an app or WPE helper exists. (ledger: Task 9 POINTER for Task 12)
+- Step 5 deletes only the file `$APP/launch.env` (its `WS_READY_TIMEOUT_S=0` turns the start-up watchdog off); the hook code stays. Then the journal's start line must not mention `with overrides from`. (ledger: R5)
+- After step 3, check that XOVI survived the `systemctl stop`/`start xochitl` pair: the AppLoad icon is still there without a triple press. (ledger: final review launcher-safety declinedToJudge#5)
+- Run the launcher host test under the shell device-facts reports and add that run to CI: `apt-get install busybox`, `WS_TEST_SH` = a symlink named `ash` to busybox (`'/bin/busybox sh'` breaks the harness's quoting). (ledger: final review tests-ci#6)
+- Cleanup now takes `wifi-signin-exit 30000000000`, then unlocks `wifi-signin` (replacing the Timings row "Final timed wakelock"); 40 s after each exit, `grep -w wifi-signin /sys/power/wake_lock` prints nothing. (ledger: R27)
+- Consider `-p KillMode=mixed` (systemd TERMs only `launch`; today the app gets a second TERM mid-drain), but only if test 4(b) still passes: with mixed, a dead `launch` leaves the app to the final SIGKILL. (ledger: Task 9 M1)
+- Lock-owner liveness is `kill -0` only (PID reuse): also check the owner's identity (`comm` is `launch`; its exe is the shell), and give `lock_live_pid`'s owner a fake one. (ledger: Task 9 M4)
+- `appload-entry.sh` runs `${WS_SYSTEMD_RUN:-systemd-run}`, a test-only seam: the deploy script, `launch.env` and the packages never set it. (ledger: R30)
+- In `launch`'s `leave`, when the second `wait` returns 127 and `APP_RC` is set (a TERM right after `wait`), use `APP_RC`, not 127 "unknown". (ledger: Task 9 M7)
 
 **Files:**
 - Create: `scripts/deploy-wifi-signin.sh` (over SSH to `root@10.11.99.1`)
@@ -764,6 +791,14 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 
 ### Task 13: App foundation: flag, exit path, ready file, log handler, rendering, power key
 
+**Carry-forward from Part A (2026-10-25):**
+- `captiveLogHandler` caps each message at a few KB before `redactLogLine`: the filter's closer look-behind is quadratic (400 KB of URLs took 14 s). (ledger: Task 6 minor (deferred, from re-review))
+- App lines never reach the journal (stderr goes to `/run/wifi-signin/stderr`): give `tools/device-checks/lib.sh` a helper that greps only the log lines (`/home/root/.wifi-signin/log*`) added since `session_start`, for Tasks 13-18. (ledger: final review spec-alignment#2)
+- Step 1's `no_vendor_refresh` is replaced: this session's log lines hold `[captive] mode on` and no `[refresh] EPFramebuffer ready` (the journal grep passes even if `epaper.init()` runs). (ledger: final review spec-alignment#2)
+- Call `argc = stripCaptiveFlag(argc, argv)` before `QGuiApplication app(argc, argv)` (main.cpp:3545, it takes `int&`), not just before the url and savePath parse (3566-3567). (ledger: Task 5 POINTER for Task 13)
+- `power_reader.h` ports rmbrowser's PowerReader: credit it in its header comment and check that `NOTICE` has rmbrowser's copyright line (Task 10). (ledger: Task 1 minor (deferred))
+- Replace plan task numbers in Part A comments (log_filter.h:8, probe_runner.h:42, captive_config_test.cpp:297, launch:19) with the file or function meant. (ledger: final review deferred-triage#30)
+
 **Files:**
 - Modify: `engine/wpeqt/main.cpp`
   - globals: add `static bool g_captive = false;` next to the other `g_*` globals;
@@ -801,6 +836,24 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 - [ ] **Step 5: Commit.** Message: `feat(captive): flag, exit path, ready file, log handler, power key`.
 
 ### Task 14: Controller wiring, probe runner, start-up screens, captive bar
+
+**Carry-forward from Part A (2026-10-25):**
+- A controller navigation must never pass the `rmweb:tls-continue` gate, which trusts `expectUserNav` as a tap (main.cpp:445): the `navigate` hook must not set `m_expectUserNav` once Task 15 drops the auto-refresh guard, or use its own flag. (ledger: final review controller#2)
+- Step 1's journal greps become log reads (Task 13's helper): `already_open` needs the `showScreen` hook to log the screen text; `portal_then_idle_grant` looks for `[nav] uri=http://<mac-ip>:8080`. (ledger: final review spec-alignment#2)
+- In `onLoadFailed`'s non-cancelled branch, call `m_ctl->onLoadEnd(uri)` after `load_alternate_html` (main.cpp:1893) so the Location fallback wins; keep it before the cancelled early return (or defer `load_uri`). (ledger: R31)
+- Add a `14-flow.sh` check that fails the view's load of the probe URL after the probe saw 302 + Location (e.g. a fake-portal mode resetting the second request); the log must show the Location host. (ledger: R31)
+- Create and declare `m_probe` before `m_ctl` (the runner outlives the controller), never recreate either mid-session, and call `runCycle` only through the controller hook: a destroyed or overlap-refused runner never calls `done`, which stops re-probing. (ledger: final review controller#3)
+- Call `engine.captiveActivity()` from every gesture, not only the tap lambda: also the `swipe` (main.cpp:3740) and `longPress` (:3820) connections, or TouchReader's touch-down. (ledger: final review controller#4)
+- No stale load end may reach `onLoadEnd` between `navigate(viewUrl)` and that load's own end: the first load end after it consumes the Location fallback (R21). (ledger: Task 8 POINTER for Task 14)
+- Log every cycle's result with `gAddress`, `aAddress` and the new `CycleReport::confirmAddress` (spec §5: the resolved address is logged). (ledger: R33)
+- Add a device `clock_wrong` case: grant, `confirm = https://<mac-ip>:8084/confirm` (expired leaf); the log shows `Connected. The tablet clock looks wrong.`, then `wait_exit 20 15`. (ledger: Task 7 'resolved by controller')
+- The TLS session cache is process-global: if one session can run two confirmations to a host, record whether both report OnlineClockWrong, then reword probe_runner.h:9-10. (ledger: final review deferred-triage#10)
+- An unloadable `ca_file` falls back to the system trust store (probe_runner.h:214): fail closed (an empty `GTlsFileDatabase`) or reword the comment. (ledger: final review deferred-triage#9)
+- In `onCycleDone`, prefer an Online result over the idle exit when both are due at once (idle 22 wins today); pin it with a controller test. (ledger: final review deferred-triage#13)
+- Re-check `exit_ != ExitState::None` after `updateStatus` and before each later hook call in `setScreen` and `enterPortal`; test a `setStatus` hook that exits re-entrantly. (ledger: final review deferred-triage#12)
+- Bound the probe body read (`soup_session_send_async`, at most 64 KB), add `-Werror` to the probe build, and pin the 5 s deadline with a blackholed connect target if CI timing allows. (ledger: final review deferred-triage#11)
+- Optional: a per-cycle deadline in the controller (about 15 s) that treats a silent cycle as NoNetwork and logs it. (ledger: final review controller#3)
+- Make `scheduler()` a narrow test-only accessor unless main.cpp logs from it; wrap controller.h:43 (158 characters). (ledger: final review deferred-triage#14)
 
 **Files:**
 - Modify: `engine/wpeqt/main.cpp`
@@ -862,6 +915,14 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 
 ### Task 15: Privacy and hardening in the engine
 
+**Carry-forward from Part A (2026-10-25):**
+- Step 1's `privacy` adds a `login-password` run (a fake-portal variant from the Part A fix wave) where the owner types a unique username and password: four `wait_exit 20 60`, then 0 hits for both in the log and `/home/root/.rmweb/passwords.txt`. (ledger: final review spec-alignment#1)
+- Put the captive allowlist before upstream's `rmweb:` dispatch (main.cpp:427), so `[nav] unknown rmweb: command ignored: %s` (page text) never logs; keep reader mode unreachable so `[reader] not applied: %s` never fires. (ledger: Task 6 POINTER for Task 15)
+- `scheme_blocked` also asserts that this session's log lines hold no `[nav] unknown rmweb: command`; the filter's opaque-URL redaction (R29) is only a second guard. (ledger: final review deferred-triage#8)
+- `rmweb:tls-continue` passes the allowlist only into upstream's gate (main.cpp:445), whose `expectUserNav` must come from a tap, never from the controller's `navigate` hook (Task 14). (ledger: final review controller#2)
+- Step 1's `download_blocked` cannot see `[dl] blocked in captive mode`: the log filter drops every `[dl]` line and stderr never reaches the journal. Log it under a kept tag, e.g. `[captive] download blocked`. (ledger: R13)
+- Read Step 1's other app lines (`[captive] settings …`, `[captive] blocked navigation: …`) through Task 13's log helper, never from the journal. (ledger: final review spec-alignment#2)
+
 **Files:**
 - Modify: `engine/wpeqt/main.cpp`. Every change is guarded by `g_captive`.
 
@@ -914,6 +975,11 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 
 ### Task 16: Taps, popups, submit trigger, certificate hint
 
+**Carry-forward from Part A (2026-10-25):**
+- Backdate the self-signed leaf like the CA-signed ones (`openssl ca -selfsign -startdate`): with a tablet clock slightly behind, `tls-portal` sees NOT_ACTIVATED and shows the clock hint wrongly. (ledger: Task 2 POINTER for Task 16)
+- Before the TLS checks, make `certs.py` write a random 63-bit serial (`format(secrets.randbits(63), '016x')`): the CA persists across runs, while every leaf restarts at serial 01. (ledger: Task 2 POINTER for Task 16)
+- If the fake portal is touched: `tls-*` variants exit 1 without OpenSSL 3 (today: `ready` with dead TLS ports), catch `ValueError` from a bad `--san`, answer a non-latin-1 `/raw?location=` with 400. (ledger: final review deferred-triage#24)
+
 **Files:**
 - Create: `engine/wpeqt/captive/tap_js.h`
 - Modify: `engine/wpeqt/main.cpp`
@@ -964,6 +1030,13 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 ## Part D: Packaging, acceptance and the other devices
 
 ### Task 17: Vellum packages and CI build
+
+**Carry-forward from Part A (2026-10-25):**
+- Before step 3's first push, the owner sets `git config user.email` (e.g. the GitHub noreply address) and decides whether to rewrite the authors: every commit so far is `edgarrodriguez@Edgars-Mac-mini.local`. (ledger: Task 1 minor (deferred))
+- Step 3's push also triggers `tests.yml` (now on `wifi-signin` pushes and `wifi-signin-v*` tags): that first CI run must be green before step 4. (ledger: final review tests-ci#2)
+- That run must exercise, not skip: OpenSSL 3.0 cert generation (R8), the launcher test under dash as /bin/sh, and `probe_runner_test.sh` on libsoup 3.4 with GnuTLS; under CI a skip now fails. (ledger: Task 2 and Task 7 'resolved by controller')
+- `entry_no_systemd_run_exits_13` must pass there with `WS_SYSTEMD_RUN` set to a missing path: no case may reach the host's real `systemd-run`, `systemctl` or `mount`. (ledger: R30)
+- If Task 10 chose a 3.29 SDK, `image()` uses the matching `eeems/remarkable-toolchain` tag, not `5.8.203-aarch64`. (ledger: R6)
 
 **Files:**
 - Create: `packaging/vellum/rmweb-runtime/VELBUILD`, `packaging/vellum/wifi-signin/VELBUILD`, `.github/workflows/vellum-package.yml`, `docs/wifi-signin/README.md`
@@ -1039,6 +1112,14 @@ rmweb-NOTICE::https://raw.githubusercontent.com/exp78/rmweb/v$pkgver/NOTICE
 - [ ] **Step 6: Commit.** Message: `build(vellum): rmweb-runtime and wifi-signin packages`.
 
 ### Task 18: Acceptance on the Paper Pro
+
+**Carry-forward from Part A (2026-10-25):**
+- Test 7's triple press within 10 s after exit comes after cleanup restarted xovi-tripletap, so it runs `xovi/start` on a xochitl under 30 s old (a crash hazard): agree the expected result with the owner first. (ledger: final review launcher-safety declinedToJudge#6)
+- Test 6 reuses `15-privacy.sh` with its `login-password` run: the typed username and password appear neither in the log nor in `/home/root/.rmweb/passwords.txt`. (ledger: final review spec-alignment#1)
+- Test 4: during a session `/sys/power/wake_lock` lists `wifi-signin`; 40 s after each exit neither `wifi-signin` nor `wifi-signin-exit` (`grep -w wifi-signin` matches both). Record R27 as a spec §6 erratum. (ledger: R27)
+- Include Task 14's `clock_wrong` case and record its result on the device's libsoup 3.6 with OpenSSL. (ledger: Task 7 'resolved by controller')
+- Record the OS version (`os=` from device-facts) with the results: the Paper Pro runs 3.29, while spec §2 names 3.28.x. (ledger: R6)
+- Record each test-1 run's probe-cycle count from that session's log lines, not the journal. (ledger: final review deferred-triage#14)
 
 **Files:**
 - Create: `tools/device-checks/acceptance.sh`, `docs/wifi-signin/acceptance-paper-pro.md`
