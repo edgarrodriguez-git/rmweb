@@ -2,6 +2,7 @@
 // Build+run on the dev host:
 //   clang++ -std=c++17 -o build/captive_log_filter_test tests/captive_log_filter_test.cpp && ./build/captive_log_filter_test
 #include "../engine/wpeqt/captive/log_filter.h"
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -141,6 +142,65 @@ int main() {
           == "[tls] cert error: https://portal.example:8443 (x)");
     CHECK(red("[tls] cert error: https://u:p)q@h:8443/a#f (x)") == "[tls] cert error: https://h:8443 (x)");
 
+    // ---- redactLogLine: opaque URLs of a fixed scheme list keep only "scheme:" (R29) ----
+    CHECK(red("[nav] uri=data:text/html,<b>Welcome Mr Smith room 412</b>") == "[nav] uri=data:");
+    CHECK(red("[nav] load failed: mailto:joe.smith@hotel.example (unsupported)") == "[nav] load failed: mailto: (unsupported)");
+    CHECK(red("javascript:alert(document.cookie)") == "javascript:");
+    CHECK(red("(mailto:a@b.c)") == "(mailto:)");
+    // every listed scheme, ASCII case-insensitive; the scheme is kept as written
+    CHECK(red("a vbscript:msgbox(1) b") == "a vbscript:");
+    CHECK(red("a blob:https://h.x/550e8400-e29b b") == "a blob: b");
+    CHECK(red("a tel:+1-555-0100 b") == "a tel: b");
+    CHECK(red("a sms:+15550100?body=room%20412 b") == "a sms: b");
+    CHECK(red("DATA:text/plain,x") == "DATA:");
+    CHECK(red("[nav] uri=JavaScript:void(0)") == "[nav] uri=JavaScript:");
+    CHECK(red("MailTo:x@y.z end") == "MailTo: end");
+    // data, javascript and vbscript carry free text that WebKit leaves unencoded (spaces included) in an opaque path,
+    // so their tail runs to the end of the line; the address schemes end at whitespace like a scheme:// tail
+    CHECK(red("[nav] uri=javascript:alert('Mr Smith, room 412')") == "[nav] uri=javascript:");
+    CHECK(red("[nav] uri=data:text/plain,Mr Smith\nnext line") == "[nav] uri=data:\nnext line");
+    CHECK(red("[nav] uri=data:a b\r\nnext") == "[nav] uri=data:\r\nnext");
+    CHECK(red("a mailto:x@y.z b tel:+1555 c") == "a mailto: b tel: c");
+    CHECK(red("(see data:text/plain,x)") == "(see data:)");                       // R14 closer, end-of-line tail
+    CHECK(red("(data:a b) end") == "(data:");                                     // the cost: glued prose goes too
+    // token boundary: start of the string or a character that is not alphanumeric and not + - .
+    CHECK(red("ok\ndata:x") == "ok\ndata:");
+    CHECK(red("uri=data:x") == "uri=data:");
+    CHECK(red("\"tel:+1555\"") == "\"tel:\"");
+    CHECK(red("x-data:abc") == "x-data:abc");
+    CHECK(red("x+data:abc") == "x+data:abc");
+    CHECK(red("x.data:abc") == "x.data:abc");
+    CHECK(red("1data:abc") == "1data:abc");
+    CHECK(red("_data:abc") == "_data:");                                          // '_' is not a scheme character
+    // near misses stay
+    CHECK(red("metadata:x") == "metadata:x");
+    CHECK(red("[nav] data: 5 bytes") == "[nav] data: 5 bytes");                    // empty tail: not a URL
+    CHECK(red("error: x") == "error: x");
+    CHECK(red("data:") == "data:");
+    CHECK(red("mailto:\tx") == "mailto:\tx");
+    CHECK(red("datax:abc") == "datax:abc");
+    CHECK(red("telephone:+1555") == "telephone:+1555");
+    CHECK(red("[t] load 12:30:01 ok") == "[t] load 12:30:01 ok");
+    // the scheme:// form stays with the authority path; an opaque scheme inside a scheme:// tail goes with that tail
+    CHECK(red("data://h.x/p?q") == "data://h.x");
+    CHECK(red("https://h.x/?next=javascript:alert(1) end") == "https://h.x end");
+    CHECK(red("https://u:data:x@h.x/p") == "https://h.x");
+    CHECK(red("mailto:a@b.c https://h.x/p?q") == "mailto: https://h.x");
+    // linear time: long lines full of colons, near misses and URLs, each URL inside a still-open '(' (a rescan per match
+    // or a look-behind per URL takes tens of seconds here; one forward pass takes milliseconds)
+    {
+        std::string big, want;
+        for (int k = 0; k < 40000; ++k) {
+            big += "metadata:x a:b:c:d mailto:u@h.x tel:+1555 (a mailto:x) (a http://u:p@h.x/p?q) ";
+            want += "metadata:x a:b:c:d mailto: tel: (a mailto:) (a http://h.x) ";
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::string got = red(big);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        CHECK(got == want);
+        CHECK(secs < 2.0);
+    }
+
     // ---- redactLogLine: lines carrying page content are dropped whole (R13) ----
     CHECK(!redactLogLine("[meta] title=Welcome Mr Smith, room 412").has_value());
     CHECK(!redactLogLine("[dl] -> /home/root/Downloads/Smith-invoice.pdf").has_value());
@@ -160,7 +220,7 @@ int main() {
     CHECK(red("[t] pageBy 1 ok") == "[t] pageBy 1 ok");
     CHECK(red("[dlx] ok [find ok") == "[dlx] ok [find ok");
 
-    // ---- redactLogLine: only scheme:// is detected ----
+    // ---- redactLogLine: a bare host without a scheme is not a URL ----
     CHECK(red("www.example.com/x?y") == "www.example.com/x?y");
     CHECK(red("see www.example.com/x?y=1 now") == "see www.example.com/x?y=1 now");
 
