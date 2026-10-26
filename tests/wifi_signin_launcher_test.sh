@@ -700,6 +700,34 @@ n=$(grep -cF "WARN: WS_STOP_DEADLINE_S='99999999999999999999' has 10 or more dig
 [ "$n" = 2 ] || fail "journal has the 20-digit WS_STOP_DEADLINE_S warning $n times, want 2 (launch and cleanup)"
 jwant "cleanup done"; gone; common
 
+setup launch_env_syntax_error_ignored
+# R34: an unbalanced quote in the dev override file. dash and BusyBox ash abort a script that sources it; bash goes
+# on with the lines before the error (WS_GUARD_S=10 here) and prints its error into the journal. launch and cleanup
+# each try the file in a subshell first and ignore all of it with a WARN. xochitl is 5 s old: the default 30 s
+# guard waits 25 s.
+printf 'WS_GUARD_S=10\nWS_GUARD_S="30\n' > "$APP/launch.env"
+WST="$T" "$T/lib/mkstat" 4242 10000; printf '105.00 90.00\n' > "$PROC/uptime"
+run "$APP/launch"
+rc_is 20
+count_is "app run" 1; restored; count_is "systemctl start xochitl" 1
+n=$(between_count "systemctl stop xovi-tripletap" "systemctl stop xochitl" "sleep 1")
+[ "$n" = 25 ] || fail "guard slept $n s, want 25 (the 30 s default: none of the file applies)"
+n=$(grep -cF "WARN: ignoring $APP/launch.env: a trial read of it failed" "$JOURNAL")
+[ "$n" = 2 ] || fail "journal has the launch.env warning $n times, want 2 (launch and cleanup)"
+jnowant "with overrides from"; jwant "cleanup done"; gone; common
+
+setup launch_env_broken_mid_session_cleanup_restores
+# The file breaks while the app runs: cleanup alone reads it, and must still restore everything.
+ENVX=(APP_MODE=hang)
+start_bg "$APP/launch"
+if wait_ready; then printf 'WS_GUARD_S="30\n' > "$APP/launch.env"; kill -TERM "$LPID"; fi
+wait_bg 20
+rc_is 0
+in_order "app run" "app TERM"; restored; count_is "systemctl start xochitl" 1
+n=$(grep -cF "WARN: ignoring $APP/launch.env: a trial read of it failed" "$JOURNAL")
+[ "$n" = 1 ] || fail "journal has the launch.env warning $n times, want 1 (cleanup)"
+jwant "cleanup done"; gone; common
+
 setup validate_numbers_bounds
 # R34: an accepted value has at most 9 digits, so $(( x * 100 )) always fits; WS_REFRESH_S must be at least 1 (0
 # spins the refresher on `sleep 0`). The others keep 0: case 15 sets WS_READY_TIMEOUT_S=0 on purpose.

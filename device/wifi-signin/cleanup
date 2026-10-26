@@ -10,12 +10,15 @@
 set -u
 
 WS_APP=${WS_APP:-/home/root/xovi/exthome/appload/wifi-signin}
+bad_env=
 if [ -f "$WS_APP/launch.env" ]; then   # the same dev overrides launch saw, for ExecStopPost's fresh environment
+  # Only if a trial read in a subshell succeeds, as in launch: a syntax error would abort cleanup under dash or ash.
   # shellcheck source=/dev/null
-  . "$WS_APP/launch.env"
+  if ( . "$WS_APP/launch.env" ) >/dev/null 2>&1; then . "$WS_APP/launch.env"; else bad_env=1; fi
 fi
 # shellcheck source=/dev/null
 . "$WS_APP/lib.sh"
+[ -z "$bad_env" ] || ws_log "WARN: ignoring $WS_APP/launch.env: a trial read of it failed (a syntax error?)"
 ws_validate_numbers
 trap '' TERM INT HUP                     # a repeated stop request must not interrupt the restore
 
