@@ -18,7 +18,8 @@ if [ -f "$WS_APP/launch.env" ]; then   # the same dev overrides launch saw, for 
 fi
 # shellcheck source=/dev/null
 . "$WS_APP/lib.sh"
-[ -z "$bad_env" ] || ws_log "WARN: ignoring $WS_APP/launch.env: a trial read of it failed (a syntax error?)"
+[ -z "$bad_env" ] ||
+  ws_log "WARN: ignoring $WS_APP/launch.env: a trial read of it failed (a syntax error, or its last command returned non-zero)"
 ws_validate_numbers
 trap '' TERM INT HUP                     # a repeated stop request must not interrupt the restore
 

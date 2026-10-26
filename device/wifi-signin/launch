@@ -19,7 +19,8 @@ set -u
 WS_APP=${WS_APP:-/home/root/xovi/exthome/appload/wifi-signin}
 # Dev-only override hook (plan Task 12): read before any WS_* timing variable, so it can set them. Only if a trial
 # read in a subshell succeeds: dash and BusyBox ash abort a script on a syntax error in a file it sources (an
-# unbalanced quote), and bash goes on with the part before it. (A file whose last command fails is ignored too.)
+# unbalanced quote), and bash goes on with the part before it. (The read's status is the file's last command's, so
+# a file whose last command returns non-zero is ignored too: end it with a plain assignment or `:`.)
 LAUNCH_ENV=
 BAD_ENV=
 if [ -f "$WS_APP/launch.env" ]; then
@@ -33,7 +34,8 @@ if [ -f "$WS_APP/launch.env" ]; then
 fi
 # shellcheck source=/dev/null
 . "$WS_APP/lib.sh"
-[ -z "$BAD_ENV" ] || ws_log "WARN: ignoring $WS_APP/launch.env: a trial read of it failed (a syntax error?)"
+[ -z "$BAD_ENV" ] ||
+  ws_log "WARN: ignoring $WS_APP/launch.env: a trial read of it failed (a syntax error, or its last command returned non-zero)"
 ws_validate_numbers
 export HOME=/home/root
 

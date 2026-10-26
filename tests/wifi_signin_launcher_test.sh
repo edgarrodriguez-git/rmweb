@@ -374,6 +374,9 @@ restored(){ # the end of every session that stopped xochitl
   [ -z "$held" ] || fail "wakelocks still held 40 s after the session (spec acceptance test 4): $held"
 }
 MOUNT_LINE(){ echo "mount -t overlay overlay -o lowerdir=$LIBEXEC,upperdir=$RUN/ovl/upper,workdir=$RUN/ovl/work $LIBEXEC"; }
+ENV_WARN(){ # the whole journal line launch and cleanup log for a launch.env that fails its trial read
+  echo "[wifi-signin] WARN: ignoring $APP/launch.env: a trial read of it failed (a syntax error, or its last command returned non-zero)"
+}
 
 # --- cases --------------------------------------------------------------------------------------------------
 
@@ -715,8 +718,23 @@ rc_is 20
 count_is "app run" 1; restored; count_is "systemctl start xochitl" 1
 n=$(between_count "systemctl stop xovi-tripletap" "systemctl stop xochitl" "sleep 1")
 [ "$n" = 25 ] || fail "guard slept $n s, want 25 (the 30 s default: none of the file applies)"
-n=$(grep -cF "WARN: ignoring $APP/launch.env: a trial read of it failed" "$JOURNAL")
+n=$(grep -cxF "$(ENV_WARN)" "$JOURNAL")
 [ "$n" = 2 ] || fail "journal has the launch.env warning $n times, want 2 (launch and cleanup)"
+jnowant "with overrides from"; jwant "cleanup done"; gone; common
+
+setup launch_env_last_command_fails_ignored
+# The trial read's status is the file's last command's: a dev file that ends in a test that comes out false is
+# ignored whole (WS_GUARD_S=10 too), and the WARN must name that cause as well as a syntax error. xochitl is 5 s
+# old: the default 30 s guard waits 25 s.
+printf 'WS_GUARD_S=10\n[ -e /nonexistent/fast ] && WS_GUARD_S=5\n' > "$APP/launch.env"
+WST="$T" "$T/lib/mkstat" 4242 10000; printf '105.00 90.00\n' > "$PROC/uptime"
+run "$APP/launch"
+rc_is 20
+count_is "app run" 1; restored; count_is "systemctl start xochitl" 1
+n=$(between_count "systemctl stop xovi-tripletap" "systemctl stop xochitl" "sleep 1")
+[ "$n" = 25 ] || fail "guard slept $n s, want 25 (the 30 s default: none of the file applies)"
+n=$(grep -cxF "$(ENV_WARN)" "$JOURNAL")
+[ "$n" = 2 ] || fail "journal has '$(ENV_WARN)' $n times, want 2 (launch and cleanup)"
 jnowant "with overrides from"; jwant "cleanup done"; gone; common
 
 setup launch_env_broken_mid_session_cleanup_restores
@@ -727,7 +745,7 @@ if wait_ready; then printf 'WS_GUARD_S="30\n' > "$APP/launch.env"; kill -TERM "$
 wait_bg 20
 rc_is 0
 in_order "app run" "app TERM"; restored; count_is "systemctl start xochitl" 1
-n=$(grep -cF "WARN: ignoring $APP/launch.env: a trial read of it failed" "$JOURNAL")
+n=$(grep -cxF "$(ENV_WARN)" "$JOURNAL")
 [ "$n" = 1 ] || fail "journal has the launch.env warning $n times, want 1 (cleanup)"
 jwant "cleanup done"; gone; common
 
