@@ -253,9 +253,9 @@ app_execed() { ws_app_alive "$APP_PID" || ! kill -0 "$APP_PID" 2>/dev/null; }
 app_ended() { ! kill -0 "$APP_PID" 2>/dev/null; }
 
 # stop_unrecorded_app: TERM, up to WS_APP_TERM_WAIT_S for the app to end, then kill -9 and up to WS_HELPER_WAIT_S
-# more. No identity check is needed: APP_PID is our own child, which kill -0 finds only until it has ended (the shell
-# reaps it then), so no other process can hold that PID yet. Clears APP_PID once the app is collected; one that
-# survives kill -9 is left to cleanup, which leave hands its PID.
+# more. No identity check: APP_PID is our own child, so its PID stays ours until the shell reaps it, which is also
+# when kill -0 stops finding it. Clears APP_PID once the app is collected; one that survives kill -9 is left to
+# cleanup, which leave hands its PID.
 stop_unrecorded_app() {
   kill -TERM "$APP_PID" 2>/dev/null
   if ! ws_wait_for "$WS_APP_TERM_WAIT_S" app_ended; then

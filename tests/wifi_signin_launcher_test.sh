@@ -26,7 +26,7 @@
 #     neither spins nor moves the clock (refresher_rewrites_and_stops sets it to 1 to watch it work).
 #   - A process that survives TERM and KILL (stuck in the e-ink driver on a tablet) is modelled by a zombie:
 #     kill -0 still finds it, and no signal removes it until its parent goes. APP_MODE=stubborn is a live app
-#     that ignores TERM, so only cleanup's kill -9 ends it.
+#     that ignores TERM, so only a kill -9 (cleanup's, or launch's for an unrecorded app) ends it.
 #   - The fake app (app/bin/wifi-signin-wpeqt) registers itself in the fake /proc and waits on a REAL
 #     /bin/sleep, so it never moves the clock. APP_MODE picks what it does; HELPER=1 also starts a fake
 #     WPEWebProcess.
