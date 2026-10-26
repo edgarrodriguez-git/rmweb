@@ -104,10 +104,18 @@ private:
 // path unencoded, raw spaces included ("data:text/html,Mr Smith", "tel:+44 20 7946 0123", "mailto:Joe Smith <joe@...>"),
 // so their tail runs to the end of the line, any text after the URL on that line included. blob: URLs are made by the
 // browser and hold no spaces: that tail ends at whitespace like a scheme:// tail. Names in lower case.
-struct LogRedactOpaqueScheme { const char* name; std::size_t len; bool toLineEnd; };
+// wsTail says how a tail that starts with a space or tab is read. WebKit keeps that whitespace in the opaque path as well
+// ("data: text/html,...", "mailto: joe@..." serialise unchanged), but log prose has it too ("Error receiving data: %s"):
+//   Prose      — never a URL: javascript: and vbscript: never reach WebKit's URI logs, and blob: URLs hold no spaces;
+//   UrlIfComma — a URL when a ',' follows on the same line: a data URL needs one, GIO's message has none;
+//   Url        — always a URL (the address schemes).
+enum class LogRedactWsTail { Prose, UrlIfComma, Url };
+struct LogRedactOpaqueScheme { const char* name; std::size_t len; bool toLineEnd; LogRedactWsTail wsTail; };
 inline constexpr LogRedactOpaqueScheme kLogRedactOpaqueSchemes[] = {
-    {"data", 4, true}, {"javascript", 10, true}, {"vbscript", 8, true},
-    {"mailto", 6, true}, {"blob", 4, false}, {"tel", 3, true}, {"sms", 3, true}};
+    {"data", 4, true, LogRedactWsTail::UrlIfComma}, {"javascript", 10, true, LogRedactWsTail::Prose},
+    {"vbscript", 8, true, LogRedactWsTail::Prose},  {"mailto", 6, true, LogRedactWsTail::Url},
+    {"blob", 4, false, LogRedactWsTail::Prose},     {"tel", 3, true, LogRedactWsTail::Url},
+    {"sms", 3, true, LogRedactWsTail::Url}};
 inline constexpr std::size_t kLogRedactOpaqueMaxLen = 10;   // "javascript"
 
 // The listed opaque scheme that ends at the ':' at s[colon], or nullptr. The whole run of scheme characters right before
@@ -142,18 +150,31 @@ inline std::size_t logRedactCutTail(const std::string& s, std::size_t from, std:
 
 // Every "scheme://authority tail" becomes "scheme://host[:port]": userinfo (up to the LAST '@' before the authority's
 // / ? # or whitespace) and the whole tail are removed. Every opaque URL of kLogRedactOpaqueSchemes becomes "scheme:"
-// (one with an empty tail — the ':' followed by whitespace or the end, as in "data: 5 bytes" — is prose and stays).
-// Text outside URLs is copied unchanged. Linear in the length of s.
+// (an empty tail — the ':' followed by the end, a CR or LF — is prose and stays, and so is a tail that starts with a
+// space or tab unless the scheme's wsTail makes it a URL: "data: 5 bytes" stays). Text outside URLs is copied unchanged.
+// Linear in the length of s.
 inline std::string logRedactUrls(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     LogRedactOpeners openers;
     std::size_t i = 0;                                   // s[0, i) has been emitted already
     std::size_t c = 0;                                   // where to look for the next ':'
+    std::size_t comma = 0, eol = 0;                      // the next ',' and the next CR or LF, as last looked up
     while ((c = s.find(':', c)) != std::string::npos) {
         if (s.compare(c, 3, "://") != 0) {               // an opaque URL, or a plain ':'
             const LogRedactOpaqueScheme* o = logRedactOpaqueSchemeAt(s, c);
-            if (o == nullptr || c + 1 == s.size() || logRedactIsTailWs(s[c + 1])) { ++c; continue; }
+            if (o == nullptr || c + 1 == s.size() || s[c + 1] == '\r' || s[c + 1] == '\n') { ++c; continue; }
+            if (s[c + 1] == ' ' || s[c + 1] == '\t') {   // a tail that starts with whitespace: as the scheme says
+                bool url = o->wsTail == LogRedactWsTail::Url;
+                if (o->wsTail == LogRedactWsTail::UrlIfComma) {
+                    // Each lookup is redone only once c has passed its result, so they only move forward and a line
+                    // full of "data: " near misses still costs O(length).
+                    if (comma <= c) comma = s.find(',', c + 1);
+                    if (eol <= c) eol = s.find_first_of("\r\n", c + 1);
+                    url = comma < eol;                   // npos when there is none
+                }
+                if (!url) { ++c; continue; }
+            }
             out.append(s, i, c + 1 - i);                 // text up to and including "scheme:"
             i = c = logRedactCutTail(s, c + 1, c - o->len, o->toLineEnd, openers, out);
             continue;

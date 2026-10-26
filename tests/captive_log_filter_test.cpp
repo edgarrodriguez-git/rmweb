@@ -181,13 +181,30 @@ int main() {
     CHECK(red("_data:abc") == "_data:");                                          // '_' is not a scheme character
     // near misses stay
     CHECK(red("metadata:x") == "metadata:x");
-    CHECK(red("[nav] data: 5 bytes") == "[nav] data: 5 bytes");                    // empty tail: not a URL
+    CHECK(red("[nav] data: 5 bytes") == "[nav] data: 5 bytes");                    // whitespace, and no ',' follows
     CHECK(red("error: x") == "error: x");
     CHECK(red("data:") == "data:");
-    CHECK(red("mailto:\tx") == "mailto:\tx");
     CHECK(red("datax:abc") == "datax:abc");
     CHECK(red("telephone:+1555") == "telephone:+1555");
     CHECK(red("[t] load 12:30:01 ok") == "[t] load 12:30:01 ok");
+    // a tail that starts with whitespace is a URL too where WebKit keeps that whitespace in the opaque path
+    // ("data: text/html,..." and "mailto: joe@..." serialise unchanged): for data: when a ',' follows on the same line
+    // (a data URL needs one; GIO's "Error receiving data: %s" has none), for mailto:, tel: and sms: always
+    CHECK(red("[nav] uri=data: text/html,<b>Welcome Mr Smith room 412</b>") == "[nav] uri=data:");
+    CHECK(red("[nav] load failed: mailto: joe.smith@hotel.example (x)") == "[nav] load failed: mailto:");
+    CHECK(red("[nav] uri=tel: +44 20 7946 0123") == "[nav] uri=tel:");
+    CHECK(red("a sms:\t+1555 b") == "a sms:");
+    CHECK(red("mailto:\tx") == "mailto:");
+    CHECK(red("DATA:\ttext/plain,x") == "DATA:");
+    CHECK(red("(see data:  a,b)") == "(see data:)");                             // R14 closer
+    CHECK(red("[nav] uri=data: a,b\nnext, line") == "[nav] uri=data:\nnext, line");
+    // ... and prose otherwise
+    CHECK(red("[nav] load failed: https://h.x/p (Error receiving data: Connection reset by peer)")
+          == "[nav] load failed: https://h.x (Error receiving data: Connection reset by peer)");
+    CHECK(red("[nav] data: 5 bytes\nnext, line") == "[nav] data: 5 bytes\nnext, line");   // the ',' is on another line
+    CHECK(red("data: 5\r,x") == "data: 5\r,x");
+    CHECK(red("mailto:\r\nx") == "mailto:\r\nx");                                // CR/LF: an empty tail
+    CHECK(red("a blob: x, y") == "a blob: x, y");
     // the scheme:// form stays with the authority path; an opaque scheme inside a scheme:// tail goes with that tail
     CHECK(red("data://h.x/p?q") == "data://h.x");
     CHECK(red("https://h.x/?next=javascript:alert(1) end") == "https://h.x end");
@@ -208,6 +225,16 @@ int main() {
         const std::string got = red(big);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         CHECK(got == want);
+        CHECK(secs < 2.0);
+    }
+    {   // a ',' far behind many whitespace-led data: near misses is looked up once, not once per near miss
+        std::string big;
+        for (int k = 0; k < 100000; ++k) big += "data: 5 x ";
+        big += "\n,";
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::string got = red(big);
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        CHECK(got == big);
         CHECK(secs < 2.0);
     }
 
