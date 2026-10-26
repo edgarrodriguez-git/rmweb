@@ -39,6 +39,34 @@ inline bool logRedactEndsAuthority(char c) {
 // userinfo. It ignores the closers above: WebKit leaves ) and ' raw in userinfo ("https://user:pa)ss@h.x/"), so a closer
 // before the '@' must not end the authority there and emit the userinfo's prefix as the host.
 inline bool logRedactEndsRfcAuthority(char c) { return c == '/' || c == '?' || c == '#' || logRedactIsWs(c); }
+
+// Can s[begin, at) — everything before the authority's last '@' (at), which ends at aend — be userinfo that WebKit
+// logged? Not if it holds a character WebKit always percent-encodes there (the WHATWG userinfo set: " < > ` { } | \ ^
+// [ ] ; = and every ':' after the first), and not if it holds a closer (" ' ) >) while the authority ends at whitespace or
+// the end: the '@' may then sit in text glued on after the URL ("(https://h.x)joe@hotel.example"). A canonical http(s)
+// URI always has a path, so neither case drops a real host. When this is false the caller logs no host at all: the
+// part before the '@' may be a password, the part after it log text.
+inline bool logRedactIsUserinfo(const std::string& s, std::size_t begin, std::size_t at, std::size_t aend) {
+    const bool pathFollows = aend < s.size() && !logRedactIsWs(s[aend]);   // aend is at '/', '?' or '#'
+    bool colon = false;
+    for (std::size_t k = begin; k < at; ++k) {
+        switch (s[k]) {
+            case '"': case '<': case '>': case '`': case '{': case '}': case '|': case '\\': case '^': case '[': case ']':
+            case ';': case '=':
+                return false;
+            case ':':
+                if (colon) return false;
+                colon = true;
+                break;
+            case '\'': case ')':
+                if (!pathFollows) return false;
+                break;
+            default:
+                break;
+        }
+    }
+    return true;
+}
 // The whole URL tail (path, query, fragment) is removed up to the next space, tab, CR or LF, or the end of the string.
 // It is NOT cut at ')' ']' '>' '"' or an apostrophe: WebKit keeps those raw in canonical URIs ("/wiki/Foo_(bar)?token=...",
 // "/(S(abc123))/login.aspx?room=12", "/O'Brien/in?room=12"), and stopping at one would leave the rest of the URL in the log.
@@ -149,7 +177,8 @@ inline std::size_t logRedactCutTail(const std::string& s, std::size_t from, std:
 }
 
 // Every "scheme://authority tail" becomes "scheme://host[:port]": userinfo (up to the LAST '@' before the authority's
-// / ? # or whitespace) and the whole tail are removed. Every opaque URL of kLogRedactOpaqueSchemes becomes "scheme:"
+// / ? # or whitespace) and the whole tail are removed; when the text before that '@' cannot be userinfo
+// (logRedactIsUserinfo), the URL becomes "scheme://" with no host. Every opaque URL of kLogRedactOpaqueSchemes becomes "scheme:"
 // (an empty tail — the ':' followed by the end, a CR or LF — is prose and stays, and so is a tail that starts with a
 // space or tab unless the scheme's wsTail makes it a URL: "data: 5 bytes" stays). Text outside URLs is copied unchanged.
 // Linear in the length of s.
@@ -193,7 +222,11 @@ inline std::string logRedactUrls(const std::string& s) {
         for (std::size_t k = i; k < aend; ++k) {
             if (s[k] == '@') hostBegin = k + 1;
         }
-        std::size_t e = hostBegin;                       // the host[:port] ends where the surrounding text closes the URL
+        if (hostBegin > i && !logRedactIsUserinfo(s, i, hostBegin - 1, aend)) {   // not userinfo: no host, all tail
+            i = c = logRedactCutTail(s, i, scheme, /*toLineEnd=*/false, openers, out);
+            continue;
+        }
+        std::size_t e = hostBegin;                      // the host[:port] ends where the surrounding text closes the URL
         while (e < s.size() && !logRedactEndsAuthority(s[e])) ++e;
         out.append(s, hostBegin, e - hostBegin);         // host[:port]
         i = c = logRedactCutTail(s, e, scheme, /*toLineEnd=*/false, openers, out);   // the tail: gone, up to whitespace

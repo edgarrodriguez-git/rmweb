@@ -122,21 +122,36 @@ int main() {
     // The '@' search runs to the RFC 3986 authority end (/ ? # whitespace) first; WebKit leaves ) and ' raw in userinfo.
     CHECK(red("[nav] uri=https://user:pa)ss@h.x/p?room=12") == "[nav] uri=https://h.x");
     CHECK(red("[nav] uri=https://user:pa'ss@h.x/p?room=12") == "[nav] uri=https://h.x");
-    CHECK(red("[nav] uri=https://user:pa\"ss@h.x/p?room=12") == "[nav] uri=https://h.x");
-    CHECK(red("[nav] uri=https://user:pa>ss@h.x/p?room=12") == "[nav] uri=https://h.x");
     CHECK(red("https://roomguest:Smith'412@portal.example:8443/login") == "https://portal.example:8443");
-    // no path: the authority runs to whitespace or the end
-    CHECK(red("https://user:pa)ss@h.x") == "https://h.x");
-    CHECK(red("https://user:pa'ss@h.x:81") == "https://h.x:81");
-    CHECK(red("x https://user:pa\"ss@h.x y") == "x https://h.x y");
-    CHECK(red("x https://user:pa>ss@h.x\ty") == "x https://h.x\ty");
-    CHECK(red("https://u:p)w@[::1]:8080") == "https://[::1]:8080");
+    // ... but WebKit always percent-encodes " < > ` { } | \ ^ [ ] ; = and a second ':' there, so text holding one is not
+    // userinfo it logged: no host at all (the part before the '@' may be a password, the part after it log text)
+    CHECK(red("[nav] uri=https://user:pa\"ss@h.x/p?room=12") == "[nav] uri=https://");
+    CHECK(red("[nav] uri=https://user:pa>ss@h.x/p?room=12") == "[nav] uri=https://");
+    for (const char ch : std::string("\"<>`{}|\\^[];=")) {
+        CHECK(red("a https://u" + std::string(1, ch) + "w@h.x/p?q b") == "a https:// b");
+    }
+    CHECK(red("a https://u:p:w@h.x/p b") == "a https:// b");
+    CHECK(red("https://u!$&'()*+,-._~%41:p@h.x/p") == "https://h.x");               // what WebKit leaves raw: kept
+    // no path: a closer before the '@' may end the URL instead ("(https://h.x)joe@hotel.example"), so no host either
+    CHECK(red("https://user:pa)ss@h.x") == "https://");
+    CHECK(red("https://user:pa'ss@h.x:81") == "https://");
+    CHECK(red("x https://user:pa\"ss@h.x y") == "x https:// y");
+    CHECK(red("x https://user:pa>ss@h.x\ty") == "x https://\ty");
+    CHECK(red("https://u:p)w@[::1]:8080") == "https://");
+    CHECK(red("https://u:pw@h.x") == "https://h.x");                                // no closer: plain userinfo
     // inside parentheses / quotes: the matching closer is still kept (R14)
     CHECK(red("(see https://u:p)w@h.x/a) end") == "(see https://h.x) end");
-    CHECK(red("(https://u:p)w@h.x) end") == "(https://h.x) end");
+    CHECK(red("(https://u:p)w@h.x) end") == "(https://) end");
     CHECK(red("'https://u:p'w@h.x/a' end") == "'https://h.x' end");
-    CHECK(red("\"https://u:p\"w@h.x/a?b\" end") == "\"https://h.x\" end");
-    CHECK(red("<https://u:p>w@h.x/a> end") == "<https://h.x> end");
+    CHECK(red("\"https://u:p\"w@h.x/a?b\" end") == "\"https://\" end");
+    CHECK(red("<https://u:p>w@h.x/a> end") == "<https://> end");
+    // text glued after a path-less URL's closer is never logged as its host
+    CHECK(red("\"https://h.x\"SECRET@tok more") == "\"https:// more");
+    CHECK(red("(https://h.x)joe@foo.example more") == "(https:// more");
+    CHECK(red("['https://portal.example','pw':'x@Secret123']") == "['https://]");
+    CHECK(red("(https://h.x)joe.smith@hotel.example") == "(https://");
+    CHECK(red("x=\"https://h.x\"@Smith-room-412 y") == "x=\"https:// y");
+    CHECK(red("x=\"https://h.x\"@Smith-room-412/y z") == "x=\"https:// z");      // '"' is never raw in userinfo
     // the [tls] form
     CHECK(red("[tls] cert error: https://roomguest:Smith'412@portal.example:8443/login (x)")
           == "[tls] cert error: https://portal.example:8443 (x)");
@@ -208,7 +223,7 @@ int main() {
     // the scheme:// form stays with the authority path; an opaque scheme inside a scheme:// tail goes with that tail
     CHECK(red("data://h.x/p?q") == "data://h.x");
     CHECK(red("https://h.x/?next=javascript:alert(1) end") == "https://h.x end");
-    CHECK(red("https://u:data:x@h.x/p") == "https://h.x");
+    CHECK(red("https://u:data:x@h.x/p") == "https://");                           // a second ':': no host
     CHECK(red("https://h.x/p?q mailto:a@b.c") == "https://h.x mailto:");
     CHECK(red("blob:x https://h.x/p?q") == "blob: https://h.x");
     // linear time: long lines full of colons, near misses and URLs, each URL inside a still-open '(' (a rescan per match
