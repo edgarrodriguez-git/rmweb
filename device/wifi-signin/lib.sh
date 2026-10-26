@@ -63,28 +63,34 @@ ws_state_add() { { printf '%s\n' "$1" >> "$WS_RUN/state"; } 2>/dev/null; }
 ws_state_has() { grep -qxF -- "$1" "$WS_RUN/state" 2>/dev/null; }
 
 # ws_settle MICROSECONDS: usleep; where there is none, a fractional sleep (upstream device/rmweb relies on
-# `sleep 0.5` on this tablet); only if that fails too, sleep rounded up to whole seconds.
+# `sleep 0.5` on this tablet); only if that fails too, sleep rounded up to whole seconds. Sets _ws_slept to the
+# centiseconds it slept (rounded up), which ws_wait_cs counts when the clock cannot be read.
 ws_settle() {
+  _ws_slept=$(( ($1 + 9999) / 10000 ))
   if command -v usleep >/dev/null 2>&1; then
     usleep "$1"
     return
   fi
   _ws_us=$(( $1 % 1000000 + 1000000 ))           # 1000000-1999999: drop the leading 1 for six digits
-  sleep "$(( $1 / 1000000 )).${_ws_us#1}" 2>/dev/null || sleep $(( ($1 + 999999) / 1000000 ))
+  sleep "$(( $1 / 1000000 )).${_ws_us#1}" 2>/dev/null && return
+  _ws_s=$(( ($1 + 999999) / 1000000 ))
+  _ws_slept=$(( _ws_s * 100 ))
+  sleep "$_ws_s"
 }
 
 # ws_wait_cs CENTISECONDS FUNCTION: polls FUNCTION every 0.2 s until it succeeds. Returns 1 once the boot clock
 # is past the deadline (its value at the start + CENTISECONDS) with FUNCTION still failing, however long each
 # check or settle takes. FUNCTION is tried at least once, and again after the settle that crosses the deadline.
-# A pass count (one pass per 5 cs, i.e. 4x the nominal polls) is only a backstop for an unreadable clock.
+# The time slept is the backstop for an unreadable clock: the wait also ends once its settles add up to
+# CENTISECONDS (1 s each where sleep takes no fraction). Never sooner than the clock: it counts sleep only.
 ws_wait_cs() {
-  _ws_left=$(( $1 / 5 ))
+  _ws_left=$1
   if _ws_end=$(ws_uptime_cs); then _ws_end=$(( _ws_end + $1 )); else _ws_end=; fi
   while ! "$2"; do
     [ "$_ws_left" -gt 0 ] || return 1
     if [ -n "$_ws_end" ] && _ws_now=$(ws_uptime_cs) && [ "$_ws_now" -ge "$_ws_end" ]; then return 1; fi
-    _ws_left=$(( _ws_left - 1 ))
     ws_settle 200000
+    _ws_left=$(( _ws_left - _ws_slept ))
   done
   return 0
 }

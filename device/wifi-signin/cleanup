@@ -43,29 +43,36 @@ ws_log "cleanup ($mode): undoing $(tr '\n' ' ' < "$WS_RUN/state")${unrecorded:+(
 #    the boot clock (WS_STOP_DEADLINE_S), so steps 3-7 are always reached about that long after cleanup starts,
 #    whatever the app does: a process stuck in the e-ink driver survives even SIGKILL, and an ExecStopPost run
 #    that systemd kills before step 4 would leave the tablet on a frozen frame. xochitl's start is then still
-#    covered by the EPD-lock removal and the settle in step 4.
+#    covered by the EPD-lock removal and the settle in step 4. Where the boot clock cannot be read, the deadline
+#    is kept in time slept instead: the three waits get at most 3 + 10 + 7 s between them.
 apps="$(sed -n 's/^APP=//p' "$WS_RUN/state") $unrecorded"
 apps_gone() { for p in $apps; do ws_app_alive "$p" && return 1; done; return 0; }
 # shellcheck disable=SC2329  # called through ws_wait_cs
 all_gone() { apps_gone && [ -z "$(ws_helper_pids)" ]; }
 if stop_end=$(ws_uptime_cs); then stop_end=$(( stop_end + WS_STOP_DEADLINE_S * 100 )); else stop_end=; fi
-budget() { # budget SECONDS: centiseconds for one wait, at most SECONDS and never past the step's deadline
-  _b=$(( $1 * 100 ))
-  if [ -n "$stop_end" ] && _now=$(ws_uptime_cs) && [ $(( stop_end - _now )) -lt "$_b" ]; then
-    _b=$(( stop_end - _now ))
+stop_left=$(( WS_STOP_DEADLINE_S * 100 ))   # what the waits have not been granted yet, for a clock-less step
+budget() { # budget SECONDS: sets wait_cs, the centiseconds for the next wait: at most SECONDS and never past the
+  # step's deadline, on the boot clock or, without it, in the time granted to the waits before
+  wait_cs=$(( $1 * 100 ))
+  if [ -n "$stop_end" ] && _now=$(ws_uptime_cs); then
+    if [ $(( stop_end - _now )) -lt "$wait_cs" ]; then wait_cs=$(( stop_end - _now )); fi
+  elif [ "$stop_left" -lt "$wait_cs" ]; then
+    wait_cs=$stop_left
   fi
-  [ "$_b" -gt 0 ] || _b=0
-  echo "$_b"
+  [ "$wait_cs" -gt 0 ] || wait_cs=0
+  stop_left=$(( stop_left - wait_cs ))
 }
 if ! apps_gone; then
   for p in $apps; do
     if ws_app_alive "$p"; then kill -TERM "$p" 2>/dev/null; fi
   done
-  ws_wait_cs "$(budget "$WS_APP_TERM_WAIT_S")" apps_gone ||
+  budget "$WS_APP_TERM_WAIT_S"
+  ws_wait_cs "$wait_cs" apps_gone ||
     ws_log "the app is still running ${WS_APP_TERM_WAIT_S} s after TERM"
 fi
 for h in $(ws_helper_pids); do kill -9 "$h" 2>/dev/null; done
-if ! ws_wait_cs "$(budget "$WS_HELPER_WAIT_S")" all_gone; then
+budget "$WS_HELPER_WAIT_S"
+if ! ws_wait_cs "$wait_cs" all_gone; then
   # Past the app's own 12 s GUI watchdog: it is wedged. A live display owner under a restarted xochitl is the
   # worse outcome, so it goes too.
   ws_log "WARN: the app or WPE helpers remain after ${WS_HELPER_WAIT_S} s: kill -9"
@@ -73,7 +80,8 @@ if ! ws_wait_cs "$(budget "$WS_HELPER_WAIT_S")" all_gone; then
     if ws_app_alive "$p"; then kill -9 "$p" 2>/dev/null; fi
   done
   for h in $(ws_helper_pids); do kill -9 "$h" 2>/dev/null; done
-  ws_wait_cs "$(budget "$WS_STOP_DEADLINE_S")" all_gone ||
+  budget "$WS_STOP_DEADLINE_S"
+  ws_wait_cs "$wait_cs" all_gone ||
     ws_log "WARN: the app or WPE helpers survived kill -9 (stuck in the kernel?): going on ${WS_STOP_DEADLINE_S} s into cleanup"
 fi
 

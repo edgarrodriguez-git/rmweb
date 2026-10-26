@@ -133,11 +133,12 @@ fi
 xo_state() { systemctl show -p ActiveState --value xochitl 2>/dev/null; }
 xo_pid() { systemctl show -p MainPID --value xochitl 2>/dev/null; }
 # The cap (WS_GUARD_MAX_S) is a deadline on the boot clock, so slow systemctl calls count too; the pass count
-# (each pass sleeps 1 s) is only a backstop for an unreadable clock.
+# (each pass sleeps 1 s, so it counts seconds slept) is only a backstop for an unreadable clock, and never ends
+# the wait sooner than the clock would.
 passes=0; last=; age=
 if guard_end=$(ws_uptime_cs); then guard_end=$(( guard_end + WS_GUARD_MAX_S * 100 )); else guard_end=; fi
 past_guard_cap() {
-  [ "$passes" -ge $(( WS_GUARD_MAX_S * 2 )) ] && return 0
+  [ "$passes" -ge "$WS_GUARD_MAX_S" ] && return 0
   [ -n "$guard_end" ] && clock_cs=$(ws_uptime_cs) && [ "$clock_cs" -ge "$guard_end" ]
 }
 while :; do

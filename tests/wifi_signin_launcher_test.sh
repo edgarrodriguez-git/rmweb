@@ -20,7 +20,7 @@
 #     stub calls ("wifi-signin 900000000000", "wifi-signin-exit 30000000000", or "wifi-signin" for an unlock).
 #     locks_held_after replays them with the kernel's rule: a timed lock is only ever extended (R27).
 #   - Time: `sleep N` and `usleep N` move the fake boot clock (proc/uptime) by N seconds and really wait N/100
-#     (at least 10 ms), so the 30 s guard costs 0.3 s. A sleep of 1000 s or more only waits (really, N/100):
+#     (at least 10 ms), so the 30 s guard costs 0.3 s; each also adds N to the `slept` file. A sleep of 1000 s or more only waits (really, N/100):
 #     every case sets WS_REFRESH_S=100000, which parks the 60 s wakelock refresher so it neither spins nor moves
 #     the clock (refresher_rewrites_and_stops sets it to 1 to watch it work).
 #   - A process that survives TERM and KILL (stuck in the e-ink driver on a tablet) is modelled by a zombie:
@@ -138,7 +138,8 @@ EOF
 #!/bin/sh
 # stub umount: drops the mount point's lines from proc/mounts
 echo "umount $*" >> "$WST/stub.log"
-echo "clock at umount: $(awk '{ print $1 }' "$WST/proc/uptime")" >> "$WST/stub.log"
+echo "clock at umount: $(awk '{ print $1 }' "$WST/proc/uptime" 2>/dev/null)" >> "$WST/stub.log"
+echo "slept at umount: $(cat "$WST/slept" 2>/dev/null | awk '{ s += $1 } END { printf "%.2f", s }')" >> "$WST/stub.log"
 mp=; for a in "$@"; do mp=$a; done
 grep -vF -- " $mp overlay " "$WST/proc/mounts" > "$WST/proc/mounts.new"; mv -f "$WST/proc/mounts.new" "$WST/proc/mounts"
 exit 0
@@ -152,7 +153,7 @@ case $1 in *.*) if [ -n "${SLEEP_NO_FRACTION:-}" ]; then echo "sleep: invalid nu
 real=$(awk -v d="$1" 'BEGIN { r = d / 100; if (r < 0.01) r = 0.01; print r }')
 if awk -v d="$1" 'BEGIN { exit !(d >= 1000) }'; then echo "$$" >> "$WST/pids"; exec /bin/sleep "$real"; fi
 /bin/sleep "$real"
-"$WST/lib/advance" "$1"
+"$WST/lib/advance" "$1"; echo "$1" >> "$WST/slept"
 n=$(( $(cat "$WST/sleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WST/sleeps"
 if [ -x "$WST/hooks/after_sleep" ]; then "$WST/hooks/after_sleep" "$n"; fi
 exit 0
@@ -163,7 +164,7 @@ EOF
 echo "usleep $*" >> "$WST/stub.log"
 s=$(awk -v u="$1" 'BEGIN { print u / 1000000 }')
 /bin/sleep "$(awk -v s="$s" 'BEGIN { r = s / 100; if (r < 0.01) r = 0.01; print r }')"
-"$WST/lib/advance" "$s"
+"$WST/lib/advance" "$s"; echo "$s" >> "$WST/slept"
 n=$(( $(cat "$WST/usleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WST/usleeps"
 if [ -x "$WST/hooks/after_usleep" ]; then "$WST/hooks/after_usleep" "$n"; fi
 exit 0
@@ -186,8 +187,10 @@ last=$(tail -n 1 "$s"); [ "$(cat "$f")" = "${last:--}" ] || exit 0
 EOF
   cat > "$T/lib/advance" <<'EOF'
 #!/bin/sh
-# advance SECONDS: moves the fake boot clock forward (atomic replace: readers never see a torn file)
+# advance SECONDS: moves the fake boot clock forward (atomic replace: readers never see a torn file); a case
+# that hides proc/uptime (an unreadable clock) has none to move
 u="$WST/proc/uptime"
+[ -f "$u" ] || exit 0
 awk -v d="$1" '{ printf "%.2f %s\n", $1 + d, $2 }' "$u" > "$u.$$" && mv -f "$u.$$" "$u"
 EOF
   cat > "$T/lib/mkstat" <<'EOF'
@@ -853,7 +856,8 @@ echo "$out" | grep -q '^fail rc=1 checks=5 ' || fail "ws_wait_for 5 with 1 s che
 t="$(echo "$out" | sed -n 's/^fail .* t0=\([0-9.]*\) t1=\([0-9.]*\)$/\1 \2/p')"
 awk -v t="$t" 'BEGIN { split(t, a, " "); exit !(a[2] - a[1] <= 6.2) }' || fail "ws_wait_for 5 took '$t' on the fake clock, want at most 6.2 s"
 echo "$out" | grep -qx 'ok rc=0 checks=3' || fail "ws_wait_for did not return as soon as the check passed: $(echo "$out" | grep '^ok')"
-echo "$out" | grep -qx 'backstop rc=1 settles=20' || fail "unreadable clock: $(echo "$out" | grep '^backstop'), want the 20-pass backstop"
+echo "$out" | grep -qx 'backstop rc=1 settles=5' ||   # the backstop counts time slept: 5 settles of 0.2 s
+  fail "unreadable clock: $(echo "$out" | grep '^backstop'), want the 1 s backstop (5 settles of 0.2 s)"
 # ws_settle without usleep: a fractional sleep first, whole seconds only if that is refused
 if PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v usleep >/dev/null 2>&1; then
   echo "  (settle fallback part skipped: this host has a real usleep)"
@@ -863,6 +867,12 @@ else
     . "$WS_APP/lib.sh"; ws_settle 200000; ws_settle 1500000; export SLEEP_NO_FRACTION=1; ws_settle 200000' 2>/dev/null
   [ "$(tr '\n' ' ' < "$STUBLOG")" = "sleep 0.200000 sleep 1.500000 sleep 0.200000 sleep 1 " ] ||
     fail "ws_settle without usleep slept: $(tr '\n' ' ' < "$STUBLOG")"
+  # Whole-second settles count 1 s each against the no-clock backstop: a 2 s wait sleeps 2 s (a pass count, 40).
+  : > "$STUBLOG"
+  env "${ARGS[@]}" PATH="$T/stubs-nousleep:/usr/bin:/bin" SLEEP_NO_FRACTION=1 "${TEST_SH:-/bin/sh}" -c '
+    . "$WS_APP/lib.sh"; never() { return 1; }
+    mv "$WS_PROC/uptime" "$WS_PROC/uptime.away"; ws_wait_for 2 never; mv "$WS_PROC/uptime.away" "$WS_PROC/uptime"' 2>/dev/null
+  [ "$(count "sleep 1")" = 2 ] || fail "a 2 s wait without a clock or fractions slept $(count "sleep 1") whole seconds, want 2"
 fi
 
 setup guard_cap_counts_the_clock_not_passes
@@ -874,12 +884,24 @@ run "$APP/launch"
 rc_is 12
 count_is "sleep 1" 5; nowant "systemctl stop xochitl"; jwant "did not settle within 10 s"; gone; common
 
-setup cleanup_bounded_with_a_stuck_app_and_no_usleep
+setup guard_cap_without_a_clock_counts_seconds_slept
+# /proc/uptime cannot be read: the 10 s cap is then 10 s of sleep (one `sleep 1` per pass), not 20 passes.
+echo activating > "$T/units/xochitl.state"; mv "$PROC/uptime" "$PROC/uptime.away"
+ENVX=(WS_GUARD_MAX_S=10)
+run "$APP/launch"
+rc_is 12
+count_is "sleep 1" 10; nowant "systemctl stop xochitl"; jwant "did not settle within 10 s"; gone; common
+
 # launch was SIGKILLed and its app is stuck where no signal reaches it; the tablet has no usleep. cleanup post
-# must still reach xochitl's and tripletap's start, with step 2 ending 20 s into it on the boot clock.
-if PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v usleep >/dev/null 2>&1; then
-  echo "  (skipped: this host has a real usleep)"
-else
+# must still reach xochitl's and tripletap's start, with step 2 ending WS_STOP_DEADLINE_S (20 s) into it: on the
+# boot clock, or, where /proc/uptime cannot be read, in time slept (3 + 10 + 7 s), whether sleep takes a fraction
+# or only whole seconds. (Uncapped, the no-clock waits slept 132 s, or 660 s in whole seconds: past systemd's
+# final SIGKILL, so xochitl would never start.)
+for variant in clock no-clock no-clock-no-fraction; do
+  setup "cleanup_bounded_with_a_stuck_app_and_no_usleep ($variant)"
+  if PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin command -v usleep >/dev/null 2>&1; then
+    echo "  (skipped: this host has a real usleep)"; continue
+  fi
   rm -f "$T/stubs/usleep"
   sh -c '/bin/sleep 0.05 & echo "$!" > "$1"; exec /bin/sleep 120' sh "$T/zombie.pid" &
   ZPARENT=$!; echo "$ZPARENT" >> "$T/pids"        # the zombie's parent; ending it ends both
@@ -893,14 +915,24 @@ else
     echo "overlay $LIBEXEC overlay rw,lowerdir=$LIBEXEC,upperdir=$RUN/ovl/upper,workdir=$RUN/ovl/work 0 0" > "$PROC/mounts"
     echo inactive > "$T/units/xochitl.state"; echo 0 > "$T/units/xochitl.mainpid"; rm -rf "$PROC/4242"
     echo inactive > "$T/units/xovi-tripletap.state"
+    case $variant in no-clock*) mv "$PROC/uptime" "$PROC/uptime.away" ;; esac
+    case $variant in *no-fraction) ENVX=(SLEEP_NO_FRACTION=1) ;; esac
     run "$APP/cleanup" post
     rc_is 0
     in_order "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin" "systemctl reset-failed xochitl" \
       "systemctl start xochitl" "systemctl start xovi-tripletap"
-    at="$(sed -n 's/^clock at umount: //p' "$STUBLOG" | head -n 1)"
-    awk -v t="$at" 'BEGIN { exit !(t != "" && t - 1000 <= 20.2) }' ||
-      fail "cleanup step 2 took $(awk -v t="$at" 'BEGIN { print t - 1000 }') s on the fake clock, want at most 20 (+ one 0.2 s poll)"
-    want "sleep 0.200000"; nowant_re '^sleep [0-9]+$'   # fractional settles, never rounded up to whole seconds
+    slept="$(sed -n 's/^slept at umount: //p' "$STUBLOG" | head -n 1)"
+    awk -v t="$slept" 'BEGIN { exit !(t != "" && t >= 19.8 && t <= 20.2) }' ||
+      fail "cleanup step 2 slept ${slept:-?} s, want WS_STOP_DEADLINE_S = 20 (+/- one 0.2 s poll)"
+    if [ "$variant" = clock ]; then
+      at="$(sed -n 's/^clock at umount: //p' "$STUBLOG" | head -n 1)"
+      awk -v t="$at" 'BEGIN { exit !(t != "" && t - 1000 <= 20.2) }' ||
+        fail "cleanup step 2 took $(awk -v t="$at" 'BEGIN { print t - 1000 }') s on the fake clock, want at most 20 (+ one 0.2 s poll)"
+    fi
+    case $variant in
+      *no-fraction) want "sleep 1" ;;                   # every settle rounded up to a whole second
+      *) want "sleep 0.200000"; nowant_re '^sleep [0-9]+$' ;;   # fractional settles, never rounded up
+    esac
     jwant "survived kill -9"; gone
     if grep HAZARD "$STUBLOG" | grep -qv "HAZARD: xochitl started while pid $Z is alive"; then
       fail "unexpected hazard: $(grep HAZARD "$STUBLOG" | head -n 2 | tr '\n' ';')"
@@ -908,7 +940,7 @@ else
     if grep -qv '^\[wifi-signin\] ' "$JOURNAL"; then fail "journal line without the prefix: $(grep -v '^\[wifi-signin\] ' "$JOURNAL" | head -n 2)"; fi
   fi
   { kill -9 "$ZPARENT"; wait "$ZPARENT"; } 2>/dev/null
-fi
+done
 
 setup manifest
 python3 - "$SRC/external.manifest.json" <<'EOF' || fail "external.manifest.json is not the spec section 7 manifest"
