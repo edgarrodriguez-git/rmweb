@@ -89,6 +89,7 @@ refuse() { # refuse CODE WHY
   leave "$1"
 }
 
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via the TERM, INT and HUP traps
 on_signal() { # on_signal NAME CODE
   [ -n "$LEAVING" ] && return 0
   ws_log "caught SIG$1"
@@ -187,6 +188,7 @@ systemctl stop xochitl || ws_log "WARN: systemctl stop xochitl failed"
 if systemctl is-active --quiet xochitl; then
   refuse 12 "xochitl is still active after the stop: not launching"
 fi
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via ws_wait_for (and quiet)
 card_free() { ! ws_card_holder >/dev/null; }
 if ! ws_wait_for "$WS_CARD_WAIT_S" card_free; then
   holder=$(ws_card_holder)
@@ -245,8 +247,9 @@ start_watchdog() { # no ready file WS_READY_TIMEOUT_S after exec: SIGKILL the ap
   WATCH_PID=$!
 }
 
-# shellcheck disable=SC2329  # called through ws_wait_cs
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via ws_wait_cs
 app_execed() { ws_app_alive "$APP_PID" || ! kill -0 "$APP_PID" 2>/dev/null; }
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via ws_wait_for
 app_ended() { ! kill -0 "$APP_PID" 2>/dev/null; }
 
 # stop_unrecorded_app: TERM, up to WS_APP_TERM_WAIT_S for the app to end, then kill -9 and up to WS_HELPER_WAIT_S
@@ -302,6 +305,7 @@ run_app() { # one run; sets APP_RC and APP_CS
   log_exit "$APP_RC"
 }
 
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via ws_wait_for
 quiet() { [ -z "$(ws_helper_pids)" ] && card_free; }
 
 LAUNCH_PID=$$

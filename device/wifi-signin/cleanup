@@ -50,7 +50,7 @@ ws_log "cleanup ($mode): undoing $(tr '\n' ' ' < "$WS_RUN/state")${unrecorded:+(
 #    is kept in time slept instead: the three waits get at most 3 + 10 + 7 s between them.
 apps="$(sed -n 's/^APP=//p' "$WS_RUN/state") $unrecorded"
 apps_gone() { for p in $apps; do ws_app_alive "$p" && return 1; done; return 0; }
-# shellcheck disable=SC2329  # called through ws_wait_cs
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via ws_wait_cs
 all_gone() { apps_gone && [ -z "$(ws_helper_pids)" ]; }
 if stop_end=$(ws_uptime_cs); then stop_end=$(( stop_end + WS_STOP_DEADLINE_S * 100 )); else stop_end=; fi
 stop_left=$(( WS_STOP_DEADLINE_S * 100 ))   # what the waits have not been granted yet, for a clock-less step
