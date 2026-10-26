@@ -65,7 +65,7 @@ The Apple success body is exactly `<HTML><HEAD><TITLE>Success</TITLE></HEAD><BOD
 | Ready-file timeout | 30 s |
 | Retry window | 20 s |
 | Session wakelock | `wifi-signin 900000000000`, rewritten every 60 s |
-| Final timed wakelock | `wifi-signin 30000000000` |
+| Final timed wakelock | `wifi-signin-exit 30000000000`, then `wifi-signin` is unlocked (as built, R27: the kernel never shortens a timed lock) |
 | App TERM wait | 3 s |
 | Helper wait | 10 s |
 | Log cap | 262144 bytes, one rotation |
@@ -142,6 +142,7 @@ git switch -c wifi-signin v0.9.7
 **Files:**
 - Create: `tools/fake-portal/fake_portal.py`, `tools/fake-portal/certs.py`, `tools/fake-portal/test_fake_portal.py`, `tools/fake-portal/README.md`
 - Modify: `scripts/run-tests.sh` (run `python3 -m unittest discover -s tools/fake-portal -p 'test_*.py'`; a failure sets `fail=1`), `.github/workflows/tests.yml` (apt install adds `python3 openssl`)
+- As built (Part A fix wave): `tests.yml` runs on pushes to `master` and `wifi-signin`, on `wifi-signin-v*` tags, on pull requests to `master` and on `workflow_dispatch`. Under CI (`CI` or `GITHUB_ACTIONS` set) nothing may pass by skipping: `run-tests.sh` exports `WIFI_SIGNIN_REQUIRE_TLS=1`, which makes the fake-portal module fail without OpenSSL 3; `run-tests.sh` prints `[tests] fake-portal unittest: ran N tests, M skipped`, and R34(e) takes M from the last `OK`/`FAILED` summary line only. On a bare Mac the skips stay skips. (Shellcheck under CI: Task 9.)
 
 **Interfaces:**
 - Produces a CLI: `python3 tools/fake-portal/fake_portal.py --bind IP --base-port N --variant NAME [--grant-delay-s 8] [--date-offset-s 0] [--token TOKEN] [--portal-cert selfsigned|expired] --cert-dir DIR [--san NAME ...]`. A base port of N opens six listeners:
@@ -166,7 +167,7 @@ git switch -c wifi-signin v0.9.7
 - TLS endpoints: every TLS port serves `/confirm` (204) and the portal pages. The `Date` header is the current time plus `--date-offset-s`.
 - `certs.py`: `make_certs(cert_dir, san) -> dict[str, tuple[cert_path, key_path]]` using `$(brew --prefix openssl@3)/bin/openssl`, or `OPENSSL` from the environment. It produces a CA plus `valid`, `selfsigned`, `expired` (not_after one day ago) and `notyet` (not_before one year ahead) leaves. Every leaf carries every `san` entry.
 
-**Variants.** These are the spec §9 fixtures; the names are fixed.
+**Variants.** These are the spec §9 fixtures; the names are fixed. There are 21 (as built: `login-password` was added in the Part A fix wave for spec §2 test 6).
 
 | Variant | Capture response | How it grants |
 |---|---|---|
@@ -188,6 +189,7 @@ git switch -c wifi-signin v0.9.7
 | `tls-portal` | 302 to `https://<bind>:<tls_self>/portal/tls-portal/`, or to `tls_expired` with `--portal-cert expired` | POST |
 | `tls-two-hosts` | 302 to the self-signed host A | the page links to host B, `https://<san[1]>:<tls_self>/portal/tls-two-hosts/b`; for device runs, `san[1]` is the Mac IP with dashes plus `.sslip.io` |
 | `get-token` | 302 | GET `accept?room=<token>&name=Smith` |
+| `login-password` | 302 | POST `accept` from a `username` text input and a `type="password"` input (any POST grants); the credential form of the privacy test (as built) |
 | `long-select` | 302 | documented failure: 200 options; grants only through `/_control/grant` |
 | `non-ascii` | 302 | documented failure: surname `Müller`; grants only through `/_control/grant` |
 
@@ -221,7 +223,7 @@ inline constexpr const char* kAppleSuccessBody = "<HTML><HEAD><TITLE>Success</TI
 enum class ProbeKind { Google204, AppleSuccess };
 enum class ProbeClass { ProbeOk, Limited, Captive, NoNetwork };
 struct HttpReply { bool transportOk = false; int status = 0; std::string body; long long contentLength = -1; std::string location; };
-struct ProbeVerdict { ProbeClass cls = ProbeClass::NoNetwork; std::string probeUrl; std::string location; }; // location: resolved, "" if none
+struct ProbeVerdict { ProbeClass cls = ProbeClass::NoNetwork; std::string probeUrl; std::string location; }; // location: resolved, "" if none or not http(s) (as built, R28)
 std::string resolveUrl(const std::string& base, const std::string& ref);   // RFC 3986 §5.2 reference resolution
 ProbeVerdict classifyProbe(ProbeKind kind, const std::string& probeUrl, const HttpReply& r);
 enum TlsFlag : unsigned { kTlsUnknownCa = 1u<<0, kTlsBadIdentity = 1u<<1, kTlsNotActivated = 1u<<2, kTlsExpired = 1u<<3,
@@ -232,7 +234,8 @@ enum class CycleResult { Online, OnlineClockWrong, Captive, Partial, Limited, No
 const char* cycleResultName(CycleResult r);                                 // "Online", "OnlineClockWrong", ...
 struct CycleOutcome { CycleResult result = CycleResult::NoNetwork; std::string viewUrl; std::string locationUrl; };
 CycleOutcome combineCycle(bool hasDefaultRoute, const ProbeVerdict& g, const ProbeVerdict& a, TlsConfirm confirm);
-struct CycleReport { CycleOutcome outcome; std::string gAddress, aAddress; bool dateKnown = false; long long skewSec = 0; };
+struct CycleReport { CycleOutcome outcome; std::string gAddress, aAddress; bool dateKnown = false; long long skewSec = 0;
+                     std::string confirmAddress; };  // as built (R33): the confirmation's peer address, "" if not sent; last
 bool hasDefaultRoute(const std::string& procNetRoute, const std::string& iface);  // /proc/net/route text
 long long parseHttpDate(const std::string& imfFixdate);                     // epoch seconds, -1 if invalid
 bool clockSkewed(long long serverEpoch, long long deviceEpoch);             // |diff| > 300
@@ -243,7 +246,7 @@ The rules come from spec §5, "Probe".
   - ProbeOk when G answers 204, or A answers 200 with a body that equals `kAppleSuccessBody` after trimming trailing whitespace.
   - Limited when the status is 200 or in 400 to 599 and the body is empty or `contentLength` is between 0 and 4.
   - NoNetwork when `!transportOk`.
-  - Captive otherwise. `location` is set only from the Location header.
+  - Captive otherwise. `location` is set only from the Location header, and (as built, R28) only when it resolves to an `http` or `https` URL: any other scheme (`javascript:`, `data:`, `file:`, `rmweb:`, …) counts as no Location, so the view stays on the probe URL.
 - `combineCycle` decides in this order:
   1. NoNetwork if there is no route.
   2. Captive if any probe is captive. The view URL is G's probe URL when G is captive, otherwise A's, and the location comes from that probe.
@@ -399,7 +402,10 @@ public:
 
 Rules from spec §5, "Override file and logging":
 - Drop any line containing `[form]` or `setFieldText`.
+  - As built (R11, R13, fix wave): the whole message is dropped when it contains any of `kDroppedLogTags` (`log_filter.h`): `[form]`, `setFieldText`, `[meta]`, `[dl]`, `[library]`, `[find]`, `[search]` and `[t] page JS done`. Part C must log anything it needs under another tag.
 - Every URL `scheme://authority...` becomes `scheme://host[:port]`. Userinfo is removed. The path, query and fragment are removed, up to the next whitespace, `"`, `'`, `)`, `]` or `>`.
+  - As built (R12, R14): the tail runs to the next space, tab, CR or LF, and only one closer is kept, when the URL sits inside its opener. Userinfo ends at the last `@` before the RFC 3986 authority end.
+  - As built (R29, R35): an opaque URL of `data`, `javascript`, `vbscript`, `mailto`, `blob`, `tel` or `sms` (any letter case, at a token boundary) becomes `scheme:`. The tail of the first three runs to the end of the line; the others stop at whitespace. The whole filter is linear in the line length.
 
 - [ ] **Step 1: Write the failing test** with these checks:
   - `"[nav] uri=https://portal.x/login?room=12&name=Smith"` becomes `"[nav] uri=https://portal.x"`.
@@ -417,7 +423,7 @@ Rules from spec §5, "Override file and logging":
 
 **Files:**
 - Create: `engine/wpeqt/captive/probe_runner.h`, `tools/probe-cli/probe-cli.cpp`, `tests/probe_runner_test.sh`, `tests/fixtures/route-default`, `tests/fixtures/route-none`
-- Modify: `.github/workflows/tests.yml` (apt adds `libsoup-3.0-dev pkg-config`)
+- Modify: `.github/workflows/tests.yml` (apt adds `libsoup-3.0-dev pkg-config`; as built also `glib-networking`, GIO's TLS backend)
 
 **Interfaces:**
 - Consumes: Task 3 types, Task 5 `CaptiveConfig`.
@@ -436,8 +442,10 @@ public:
 - CLI: `probe-cli --google URL --apple URL --confirm URL [--ca FILE] [--route-file FILE] [--iface NAME]`. It prints one line and exits 0:
 
   ```
-  result=<cycleResultName> view=<url> location=<url> g_addr=<addr> skew=<seconds|unknown>
+  result=<cycleResultName> view=<url> location=<url> g_addr=<addr> skew=<seconds|unknown> c_addr=<addr>
   ```
+
+  As built (R33): the line ends with `c_addr=`, the HTTPS confirmation's peer address (`CycleReport::confirmAddress`), empty when the confirmation was not sent or never connected. It comes last, so a parser must not anchor `skew=` at the end of the line.
 
 **Implementation decisions (spec §5).**
 - Use a new `SoupSession` per cycle, with `timeout` = 5 and `idle-timeout` = 1. If `caFile` is set, use `tls-database` = `g_tls_file_database_new(caFile)`.
@@ -450,7 +458,7 @@ public:
 - Route: read `routeFile` and call `hasDefaultRoute`.
 
 - [ ] **Step 1: Write the failing test** `tests/probe_runner_test.sh`.
-  - If `pkg-config --exists libsoup-3.0` fails, print `[tests] libsoup-3.0 not found — skipping probe runner test` and exit 0.
+  - If `pkg-config --exists libsoup-3.0` fails, print `[tests] libsoup-3.0 not found — skipping probe runner test` and exit 0. As built: under CI (`CI` or `GITHUB_ACTIONS` set) it fails instead, and a missing GIO TLS backend or a portal without TLS fails everywhere.
   - Otherwise build `build/probe-cli` with `clang++ -std=c++17 tools/probe-cli/probe-cli.cpp $(pkg-config --cflags --libs libsoup-3.0 gio-2.0)`, start `fake_portal.py --bind 127.0.0.1 --base-port <free>` per case, and assert the printed fields:
 
   | Case | Setup | Expected |
@@ -470,7 +478,7 @@ public:
   Both route fixtures use iface `test0`; `route-default` holds a default route.
 - [ ] **Step 2: Run it and confirm it fails.** `bash tests/probe_runner_test.sh` fails at the compile step (missing `probe-cli.cpp`).
 - [ ] **Step 3: Implement `probe_runner.h` and `probe-cli.cpp`.** The CLI runs a `GMainLoop` on the default context and quits on `done`.
-- [ ] **Step 4: Run it and confirm it passes.** `bash tests/probe_runner_test.sh` prints `probe runner: 11/11 OK`; `bash scripts/run-tests.sh` ends with `ALL HOST TESTS OK`.
+- [ ] **Step 4: Run it and confirm it passes.** `bash tests/probe_runner_test.sh` prints `probe runner: 11/11 OK`; `bash scripts/run-tests.sh` ends with `ALL HOST TESTS OK`. (As built: `17/17`, after `skew-captive`, `limited-cl`, `a-only`, `mixed`, `clock-notyet` and `refused` were added.)
 - [ ] **Step 5: Commit.** Message: `feat(captive): libsoup probe runner and CLI`.
 
 ### Task 8: Captive controller
@@ -533,6 +541,8 @@ public:
   | Captive, NoNetwork or Limited | no navigation and no exit |
 
 - Location fallback: a load end whose host is the view URL's host, when the last captive outcome had a location, triggers `navigate(location)` once.
+  - As built (R18, R21, R28): only the one `navigate(viewUrl)` that shows the portal arms it, and only for an `http` or `https` location. The FIRST load end after that consumes it, and it navigates only when that load end is exactly the view URL (fragment ignored).
+  - As built (R31): `navigate` may be called synchronously from inside `onLoadEnd`. The host must let that navigation win over any load it issues itself after `onLoadEnd` returns; see Task 14.
 - A report with `dateKnown && |skewSec| > 300` triggers `setStatus(kStatusClockWrong)`.
 - Idle: no `onUserActivity` for `idleTimeoutS × 1000` ms exits 22.
 - Buttons: Cancel exits 21 and UseAsIs exits 24 from any state.
@@ -568,6 +578,7 @@ public:
 **Files:**
 - Create: `device/wifi-signin/lib.sh`, `device/wifi-signin/appload-entry.sh`, `device/wifi-signin/launch`, `device/wifi-signin/cleanup`, `device/wifi-signin/external.manifest.json`, `tests/wifi_signin_launcher_test.sh`
 - Modify: `scripts/run-tests.sh` (the shellcheck loop adds `device/wifi-signin/lib.sh device/wifi-signin/appload-entry.sh device/wifi-signin/launch device/wifi-signin/cleanup`)
+  - As built: under CI a missing shellcheck fails (R34(f)). R34(d) adds a targeted `SC2317` disable to each function that is called only indirectly, because CI's apt shellcheck 0.9.0 flags those as unreachable and 0.11.0 does not.
 
 **Interfaces:**
 - Produces (`lib.sh`, POSIX sh, sourced by the other three). Every path and timing comes from the environment, with these defaults:
@@ -580,16 +591,24 @@ public:
   WS_RETRY_WINDOW_S=20 WS_REFRESH_S=60 WS_APP_TERM_WAIT_S=3 WS_HELPER_WAIT_S=10
   ```
 
+  As built, three more:
+  - `WS_GUARD_MAX_S=180`: the guard gives up with exit 12 (R25);
+  - `WS_STOP_DEADLINE_S=20`: one deadline for cleanup's whole stop step;
+  - `WS_SYSTEMD_RUN=systemd-run`: what `appload-entry.sh` checks for and runs (R30). This is a test-only seam: the host test points it at a missing path, and the deploy script, `launch.env` and the packages never set it.
+
   Functions:
   - `ws_log MSG`: stdout with the prefix `[wifi-signin]`, so it lands in the journal;
   - `ws_state_add TOKEN` and `ws_state_has TOKEN`: one token per line in `$WS_RUN/state`; the tokens are `WAKELOCK`, `TRIPLETAP`, `STOPPED_XOCHITL`, `MOUNTED` and `APP=<pid>`;
-  - `ws_settle MICROSECONDS`: `usleep`, falling back to `sleep` rounded up;
+  - `ws_settle MICROSECONDS`: `usleep`, falling back to `sleep` rounded up (as built: a fractional `sleep` first, then whole seconds);
   - `ws_card_holder`: prints the first PID whose `$WS_PROC/<pid>/fd/*` links to `$WS_CARD`, returning 1 if none;
   - `ws_helper_pids`: PIDs whose `$WS_PROC/<pid>/cmdline` contains `wpe-webkit-2.0/WPE`;
-  - `ws_xochitl_age`: integer seconds; MainPID from `systemctl show -p MainPID --value xochitl`; field 22 after the last `)` of `$WS_PROC/<pid>/stat`, divided by 100; the current time is the first field of `$WS_PROC/uptime`;
+  - `ws_xochitl_age`: integer seconds; MainPID from `systemctl show -p MainPID --value xochitl`; field 22 after the last `)` of `$WS_PROC/<pid>/stat`, divided by 100; the current time is the first field of `$WS_PROC/uptime` (as built: the difference is taken in centiseconds, uptime's two decimals included, and floored once, so 29.01 s is never called 30);
   - `ws_exit_meaning CODE`: the same strings as Task 5's `exitMeaning`;
   - `ws_wakelock SPEC`: writes to `$WS_SYSPOWER/wake_lock`;
-  - `ws_wakeunlock`: writes `wifi-signin` to `$WS_SYSPOWER/wake_unlock`.
+  - `ws_wakeunlock`: writes `wifi-signin` to `$WS_SYSPOWER/wake_unlock` (as built: `ws_wakeunlock NAME` writes NAME, R27).
+  - As built, also:
+    - `ws_validate_numbers`: launch and cleanup run it right after `launch.env`. A timing value that is empty, not plain decimal or has a leading 0 goes back to its default with a WARN, because dash and ash abort the whole script on a bad `$(( ))`. R34(b) adds two rules: a value of 10 or more digits also goes back to its default, and `WS_REFRESH_S` is at least 1;
+    - `ws_defaults`, `ws_wait_cs`/`ws_wait_for` (deadline polls on the boot clock), `ws_uptime_cs`, `ws_cmdline` and `ws_app_alive` (a recorded PID counts as the app only while its cmdline holds `wifi-signin-wpeqt`).
 - `appload-entry.sh`, `launch` and `cleanup` behave exactly as spec §6 describes, steps 1 to 8.
   - `launch` sources `$WS_RUNTIME/rmweb-env.sh` with `R=$WS_RUNTIME`. It then exports:
 
@@ -602,7 +621,8 @@ public:
     and runs `$WS_APP/bin/wifi-signin-wpeqt 2>"$WS_RUN/stderr"`.
   - The overlay copies `$WS_RUNTIME/libexec/wpe-webkit-2.0/.` into `$WS_RUN/ovl/upper/wpe-webkit-2.0/` and mounts `overlay -o lowerdir=$WS_LIBEXEC,upperdir=$WS_RUN/ovl/upper,workdir=$WS_RUN/ovl/work $WS_LIBEXEC`.
   - The retry markers are `Failed to initialize SWTCON` and `[touch] EVIOCGRAB failed`.
-  - `cleanup` takes one argument, `trap` or `post`. In `trap` mode it acts only if `$WS_RUN/pid` equals its `$PPID`. In `post` mode it exits 0 if that PID is alive.
+  - `cleanup` takes one argument, `trap` or `post`. In `trap` mode it acts only if `$WS_RUN/pid` equals its `$PPID`. In `post` mode it exits 0 if that PID is alive. (As built: `cleanup trap [APP_PID]`. launch passes the app PID it holds in memory, and cleanup stops that PID too when the state file could not record it.)
+  - As built (R5): `launch` and `cleanup` both source `$WS_APP/launch.env` if it exists, before `lib.sh`. It is a dev-only override hook (Task 12 uses it), and launch's start line then says `with overrides from …`. Under R34(c), each script sources the file only if a trial source in a subshell succeeds; otherwise it logs a WARN and ignores the file, so a syntax error cannot abort the restore.
 - Manifest (spec §7): `{"name":"Wi-Fi Sign-in","application":"/home/root/xovi/exthome/appload/wifi-signin/appload-entry.sh","workingDirectory":"/home/root/xovi/exthome/appload/wifi-signin","qtfb":false,"disablesWindowedMode":true,"aspectRatio":"original"}`.
 
 - [ ] **Step 1: Write the failing test** `tests/wifi_signin_launcher_test.sh`, modelled on `tests/launcher_test.sh`.
@@ -615,7 +635,7 @@ public:
     - `swtcon`: echoes `Failed to initialize SWTCON` to stderr and exits 134;
     - `swtcon-twice`.
   - **Cases.**
-    1. `online`: in order, `wake_lock` gets `wifi-signin 900000000000`, then `systemctl stop xovi-tripletap`, `systemctl stop xochitl`, `mount -t overlay`, the app run, `umount`, `wake_lock` gets `wifi-signin 30000000000`, `systemctl reset-failed xochitl`, `systemctl start xochitl`, `systemctl start xovi-tripletap`. Afterwards `$WS_RUN` is gone and the log contains `exit 20 (online)`.
+    1. `online`: in order, `wake_lock` gets `wifi-signin 900000000000`, then `systemctl stop xovi-tripletap`, `systemctl stop xochitl`, `mount -t overlay`, the app run, `umount`, `wake_lock` gets `wifi-signin 30000000000`, `systemctl reset-failed xochitl`, `systemctl start xochitl`, `systemctl start xovi-tripletap`. Afterwards `$WS_RUN` is gone and the log contains `exit 20 (online)`. (As built, R27: after `umount`, `wake_lock` gets `wifi-signin-exit 30000000000` first, then `wake_unlock` gets `wifi-signin`, before `systemctl reset-failed xochitl`.)
     2. `each_code_meaning`: 20 to 24, 0, 1, 2, 63 and 134 log their meanings.
     3. `term_mid_run`: SIGTERM to `launch` during `hang` restores xochitl.
     4. `launch_sigkilled_post_cleanup`: SIGKILL `launch`, then run `cleanup post`. It undoes the recorded state in reverse; xochitl and tripletap are started.
@@ -633,10 +653,10 @@ public:
     16. `tripletap_inactive_left_alone`.
     17. `cleanup_twice_noop`.
     18. `entry_unit_deactivating_exits_0`: `systemctl show` prints `deactivating`, and systemd-run is not called.
-    19. `entry_no_systemd_run_exits_13`.
+    19. `entry_no_systemd_run_exits_13` (as built, R30: `WS_SYSTEMD_RUN` points at a missing path, so no case reaches a real `systemd-run` on the host).
     20. `wakelock_write_fails_never_touches_xochitl`.
 - [ ] **Step 2: Run the test and confirm it fails.** `bash tests/wifi_signin_launcher_test.sh` fails because the scripts are missing.
-- [ ] **Step 3: Implement the four scripts in POSIX sh.** `launch` traps EXIT, TERM, INT and HUP into `cleanup trap`, and keeps the wakelock refresher as a background loop while the app runs. `appload-entry.sh` is the exec line in spec §6, with `TimeoutStopSec=30` and `MemoryAccounting=yes`.
+- [ ] **Step 3: Implement the four scripts in POSIX sh.** `launch` traps EXIT, TERM, INT and HUP into `cleanup trap`, and keeps the wakelock refresher as a background loop while the app runs. `appload-entry.sh` is the exec line in spec §6, with `TimeoutStopSec=30` and `MemoryAccounting=yes`. (As built: `exec "$WS_SYSTEMD_RUN" … -p "ExecStopPost=-$WS_APP/cleanup post"`, which adds the cleanup mode (R22) and the seam (R30).)
 - [ ] **Step 4: Run the tests and confirm they pass.** `bash scripts/run-tests.sh` reports `ALL HOST TESTS OK`, and shellcheck is clean.
 - [ ] **Step 5: Commit.** Message: `feat(launcher): wifi-signin takeover launcher`.
 
@@ -725,7 +745,7 @@ public:
 - Step 5 deletes only the file `$APP/launch.env` (its `WS_READY_TIMEOUT_S=0` turns the start-up watchdog off); the hook code stays. Then the journal's start line must not mention `with overrides from`. (ledger: R5)
 - After step 3, check that XOVI survived the `systemctl stop`/`start xochitl` pair: the AppLoad icon is still there without a triple press. (ledger: final review launcher-safety declinedToJudge#5)
 - Run the launcher host test under the shell device-facts reports and add that run to CI: `apt-get install busybox`, `WS_TEST_SH` = a symlink named `ash` to busybox (`'/bin/busybox sh'` breaks the harness's quoting). (ledger: final review tests-ci#6)
-- Cleanup now takes `wifi-signin-exit 30000000000`, then unlocks `wifi-signin` (replacing the Timings row "Final timed wakelock"); 40 s after each exit, `grep -w wifi-signin /sys/power/wake_lock` prints nothing. (ledger: R27)
+- Cleanup now takes `wifi-signin-exit 30000000000`, then unlocks `wifi-signin` (the Timings row "Final timed wakelock" says so now); 40 s after each exit, `grep -w wifi-signin /sys/power/wake_lock` prints nothing. (ledger: R27)
 - Consider `-p KillMode=mixed` (systemd TERMs only `launch`; today the app gets a second TERM mid-drain), but only if test 4(b) still passes: with mixed, a dead `launch` leaves the app to the final SIGKILL. (ledger: Task 9 M1)
 - Lock-owner liveness is `kill -0` only (PID reuse): also check the owner's identity (`comm` is `launch`; its exe is the shell), and give `lock_live_pid`'s owner a fake one. (ledger: Task 9 M4)
 - `appload-entry.sh` runs `${WS_SYSTEMD_RUN:-systemd-run}`, a test-only seam: the deploy script, `launch.env` and the packages never set it. (ledger: R30)
@@ -792,12 +812,13 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 ### Task 13: App foundation: flag, exit path, ready file, log handler, rendering, power key
 
 **Carry-forward from Part A (2026-10-25):**
-- `captiveLogHandler` caps each message at a few KB before `redactLogLine`: the filter's closer look-behind is quadratic (400 KB of URLs took 14 s). (ledger: Task 6 minor (deferred, from re-review))
+- `captiveLogHandler` passes the whole message to `redactLogLine`, whose `kDroppedLogTags` check must see every byte (a cap applied first could cut a tag off and log the rest). Only the surviving text may then be capped at a few KB. The cap is optional now: the filter has been linear-time since R35 (a 400 KB line of URLs takes 2 ms on the Mac). (ledger: Task 6 minor (deferred, from re-review); R35)
 - App lines never reach the journal (stderr goes to `/run/wifi-signin/stderr`): give `tools/device-checks/lib.sh` a helper that greps only the log lines (`/home/root/.wifi-signin/log*`) added since `session_start`, for Tasks 13-18. (ledger: final review spec-alignment#2)
+- `wait_exit` (Device checks) polls `journalctl -u wifi-signin` with no `--since`, cursor or invocation scope, so an earlier session's `exit CODE (` line passes it at once. Scope each check to its own session, for example with a cursor that `session_start` records (`journalctl -n 1 --show-cursor`) and reads after with `--after-cursor`. Do the same for every journal read. (ledger: R34(g))
 - Step 1's `no_vendor_refresh` is replaced: this session's log lines hold `[captive] mode on` and no `[refresh] EPFramebuffer ready` (the journal grep passes even if `epaper.init()` runs). (ledger: final review spec-alignment#2)
 - Call `argc = stripCaptiveFlag(argc, argv)` before `QGuiApplication app(argc, argv)` (main.cpp:3545, it takes `int&`), not just before the url and savePath parse (3566-3567). (ledger: Task 5 POINTER for Task 13)
 - `power_reader.h` ports rmbrowser's PowerReader: credit it in its header comment and check that `NOTICE` has rmbrowser's copyright line (Task 10). (ledger: Task 1 minor (deferred))
-- Replace plan task numbers in Part A comments (log_filter.h:8, probe_runner.h:42, captive_config_test.cpp:297, launch:19) with the file or function meant. (ledger: final review deferred-triage#30)
+- No plan task numbers in code comments. Run `git grep -n 'Task [0-9]'` over the Part A files (`engine/wpeqt/captive/`, `tests/`, `device/wifi-signin/`, `tools/fake-portal/`, `tools/probe-cli/`, `scripts/run-tests.sh`, `.github/workflows/tests.yml`) and rewrite each hit to name the file or function meant. At `int/part-a` 571d532 the hits are `log_filter.h:9`, `probe_runner.h:42`, `launch:20`, `tests/captive_config_test.cpp:318`, `tests/captive_controller_test.cpp:690`, `tests/wifi_signin_launcher_test.sh:650`, `tools/fake-portal/pages.py:136` and `tools/fake-portal/test_fake_portal.py:377`. Lines move, so re-run the grep. (ledger: final review deferred-triage#30)
 
 **Files:**
 - Modify: `engine/wpeqt/main.cpp`
@@ -839,9 +860,10 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 
 **Carry-forward from Part A (2026-10-25):**
 - A controller navigation must never pass the `rmweb:tls-continue` gate, which trusts `expectUserNav` as a tap (main.cpp:445): the `navigate` hook must not set `m_expectUserNav` once Task 15 drops the auto-refresh guard, or use its own flag. (ledger: final review controller#2)
-- Step 1's journal greps become log reads (Task 13's helper): `already_open` needs the `showScreen` hook to log the screen text; `portal_then_idle_grant` looks for `[nav] uri=http://<mac-ip>:8080`. (ledger: final review spec-alignment#2)
-- In `onLoadFailed`'s non-cancelled branch, call `m_ctl->onLoadEnd(uri)` after `load_alternate_html` (main.cpp:1893) so the Location fallback wins; keep it before the cancelled early return (or defer `load_uri`). (ledger: R31)
-- Add a `14-flow.sh` check that fails the view's load of the probe URL after the probe saw 302 + Location (e.g. a fake-portal mode resetting the second request); the log must show the Location host. (ledger: R31)
+- Step 1's journal greps become log reads (Task 13's helper): `already_open` needs the `showScreen` hook to log the screen text. (ledger: final review spec-alignment#2)
+- `portal_then_idle_grant`'s navigation-host check proves nothing: the probe URL itself already logs `[nav] uri=http://<mac-ip>:8080`. Prove that the portal page was shown, either with a cross-origin Location (`cross-origin`: look for `[nav] uri=http://<mac-ip>:8081`) or with the fake portal's own request log (stderr, one line per request: the tablet's `GET /portal/plain-form/`). (ledger: R34(g))
+- `onLoadFailed` must call `m_ctl->onLoadEnd(uri)` on every return path. That is before the cancelled return (main.cpp:1878), before the return for an empty or non-http(s) URI (:1885-1886), and after `load_alternate_html` (:1893), so the Location fallback's navigation wins over the error page. This replaces the single call before the early return in Files. The alternative to all of that: keep one call at the top and have the `navigate` hook defer `load_uri` with `g_idle_add`. Attach that idle source to `m_ctx`, though: bare `g_idle_add` targets the global default context, and `marshalToCtx` runs at once on the worker. (ledger: R31)
+- Add a `14-flow.sh` check that forces the failure. The probe must see a 302 whose Location is on another authority, such as the alt listener `:8081` that `cross-origin` uses. Then the view's own load of the probe URL must fail, for example with a fake-portal mode that resets the WebKit request (told apart by its User-Agent; the probe runner sends none). After the failure, this session's log must show `[nav] uri=http://<mac-ip>:8081`. A same-authority Location proves nothing, because the probe URL's own `[nav]` line already shows `:8080`. (ledger: R31)
 - Create and declare `m_probe` before `m_ctl` (the runner outlives the controller), never recreate either mid-session, and call `runCycle` only through the controller hook: a destroyed or overlap-refused runner never calls `done`, which stops re-probing. (ledger: final review controller#3)
 - Call `engine.captiveActivity()` from every gesture, not only the tap lambda: also the `swipe` (main.cpp:3740) and `longPress` (:3820) connections, or TouchReader's touch-down. (ledger: final review controller#4)
 - No stale load end may reach `onLoadEnd` between `navigate(viewUrl)` and that load's own end: the first load end after it consumes the Location fallback (R21). (ledger: Task 8 POINTER for Task 14)
@@ -853,7 +875,7 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 - Re-check `exit_ != ExitState::None` after `updateStatus` and before each later hook call in `setScreen` and `enterPortal`; test a `setStatus` hook that exits re-entrantly. (ledger: final review deferred-triage#12)
 - Bound the probe body read (`soup_session_send_async`, at most 64 KB), add `-Werror` to the probe build, and pin the 5 s deadline with a blackholed connect target if CI timing allows. (ledger: final review deferred-triage#11)
 - Optional: a per-cycle deadline in the controller (about 15 s) that treats a silent cycle as NoNetwork and logs it. (ledger: final review controller#3)
-- Make `scheduler()` a narrow test-only accessor unless main.cpp logs from it; wrap controller.h:43 (158 characters). (ledger: final review deferred-triage#14)
+- Make `scheduler()` (controller.h:269) a narrow test-only accessor unless main.cpp logs from it. (The 158-character comment line is already wrapped.) (ledger: final review deferred-triage#14)
 
 **Files:**
 - Modify: `engine/wpeqt/main.cpp`
@@ -916,7 +938,8 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 ### Task 15: Privacy and hardening in the engine
 
 **Carry-forward from Part A (2026-10-25):**
-- Step 1's `privacy` adds a `login-password` run (a fake-portal variant from the Part A fix wave) where the owner types a unique username and password: four `wait_exit 20 60`, then 0 hits for both in the log and `/home/root/.rmweb/passwords.txt`. (ledger: final review spec-alignment#1)
+- Step 1's `privacy` adds a `login-password` run (a fake-portal variant from the Part A fix wave) where the owner types a unique username and password: four `wait_exit 20 60`, then 0 hits for both in `log`, `log.1` and `/home/root/.rmweb/passwords.txt`. (ledger: final review spec-alignment#1)
+- Every privacy grep reads `log.1` as well as `log`, because a rotation during the four runs moves earlier lines there. One way: `cat log log.1 2>/dev/null | grep -cE …` (with two files, `grep -c` prints a count per file). The same goes for Task 13's `no_query_in_log`. (ledger: R34(g))
 - Put the captive allowlist before upstream's `rmweb:` dispatch (main.cpp:427), so `[nav] unknown rmweb: command ignored: %s` (page text) never logs; keep reader mode unreachable so `[reader] not applied: %s` never fires. (ledger: Task 6 POINTER for Task 15)
 - `scheme_blocked` also asserts that this session's log lines hold no `[nav] unknown rmweb: command`; the filter's opaque-URL redaction (R29) is only a second guard. (ledger: final review deferred-triage#8)
 - `rmweb:tls-continue` passes the allowlist only into upstream's gate (main.cpp:445), whose `expectUserNav` must come from a tap, never from the controller's `navigate` hook (Task 14). (ledger: final review controller#2)
@@ -1035,6 +1058,7 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 - Before step 3's first push, the owner sets `git config user.email` (e.g. the GitHub noreply address) and decides whether to rewrite the authors: every commit so far is `edgarrodriguez@Edgars-Mac-mini.local`. (ledger: Task 1 minor (deferred))
 - Step 3's push also triggers `tests.yml` (now on `wifi-signin` pushes and `wifi-signin-v*` tags): that first CI run must be green before step 4. (ledger: final review tests-ci#2)
 - That run must exercise, not skip: OpenSSL 3.0 cert generation (R8), the launcher test under dash as /bin/sh, and `probe_runner_test.sh` on libsoup 3.4 with GnuTLS; under CI a skip now fails. (ledger: Task 2 and Task 7 'resolved by controller')
+- That run is also the first shellcheck 0.9.0 (apt) run over `device/wifi-signin/*`: R34(d)'s `SC2317` directives must leave it clean, and a missing shellcheck fails there (R34(f)). (ledger: R34(d), R34(f))
 - `entry_no_systemd_run_exits_13` must pass there with `WS_SYSTEMD_RUN` set to a missing path: no case may reach the host's real `systemd-run`, `systemctl` or `mount`. (ledger: R30)
 - If Task 10 chose a 3.29 SDK, `image()` uses the matching `eeems/remarkable-toolchain` tag, not `5.8.203-aarch64`. (ledger: R6)
 
@@ -1115,8 +1139,8 @@ rmweb-NOTICE::https://raw.githubusercontent.com/exp78/rmweb/v$pkgver/NOTICE
 
 **Carry-forward from Part A (2026-10-25):**
 - Test 7's triple press within 10 s after exit comes after cleanup restarted xovi-tripletap, so it runs `xovi/start` on a xochitl under 30 s old (a crash hazard): agree the expected result with the owner first. (ledger: final review launcher-safety declinedToJudge#6)
-- Test 6 reuses `15-privacy.sh` with its `login-password` run: the typed username and password appear neither in the log nor in `/home/root/.rmweb/passwords.txt`. (ledger: final review spec-alignment#1)
-- Test 4: during a session `/sys/power/wake_lock` lists `wifi-signin`; 40 s after each exit neither `wifi-signin` nor `wifi-signin-exit` (`grep -w wifi-signin` matches both). Record R27 as a spec §6 erratum. (ledger: R27)
+- Test 6 reuses `15-privacy.sh` with its `login-password` run: the typed username and password appear neither in `log`, `log.1` nor `/home/root/.rmweb/passwords.txt`. (ledger: final review spec-alignment#1)
+- Test 4: during a session `/sys/power/wake_lock` lists `wifi-signin`; 40 s after each exit neither `wifi-signin` nor `wifi-signin-exit` (`grep -w wifi-signin` matches both). Record the result against erratum E1 in `docs/wifi-signin/design-errata.md` (R27, and R34's case where the exit lock cannot be taken). (ledger: R27)
 - Include Task 14's `clock_wrong` case and record its result on the device's libsoup 3.6 with OpenSSL. (ledger: Task 7 'resolved by controller')
 - Record the OS version (`os=` from device-facts) with the results: the Paper Pro runs 3.29, while spec §2 names 3.28.x. (ledger: R6)
 - Record each test-1 run's probe-cycle count from that session's log lines, not the journal. (ledger: final review deferred-triage#14)
