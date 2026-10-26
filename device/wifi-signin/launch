@@ -26,6 +26,7 @@ if [ -f "$WS_APP/launch.env" ]; then
 fi
 # shellcheck source=/dev/null
 . "$WS_APP/lib.sh"
+ws_validate_numbers
 export HOME=/home/root
 
 READY="$WS_RUN/ready"

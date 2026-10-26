@@ -16,6 +16,7 @@ if [ -f "$WS_APP/launch.env" ]; then   # the same dev overrides launch saw, for 
 fi
 # shellcheck source=/dev/null
 . "$WS_APP/lib.sh"
+ws_validate_numbers
 trap '' TERM INT HUP                     # a repeated stop request must not interrupt the restore
 
 mode=${1:-post}

@@ -6,25 +6,28 @@
 # fake /proc, /sys/power, /run and /usr/libexec on the host. Functions keep their scratch variables under the
 # _ws_ prefix (POSIX sh has no `local`).
 
-: "${WS_RUN:=/run/wifi-signin}"
-: "${WS_APP:=/home/root/xovi/exthome/appload/wifi-signin}"
-: "${WS_RUNTIME:=/home/root/.vellum/share/rmweb-runtime}"
-: "${WS_USERDIR:=/home/root/.wifi-signin}"
-: "${WS_SYSPOWER:=/sys/power}"
-: "${WS_PROC:=/proc}"
-: "${WS_EPD_LOCK:=/tmp/epframebuffer.lock}"
-: "${WS_CARD:=/dev/dri/card0}"
-: "${WS_LIBEXEC:=/usr/libexec}"
-: "${WS_GUARD_S:=30}"            # xochitl must have run this long before we stop it
-: "${WS_GUARD_MAX_S:=180}"       # give up (exit 12, xochitl untouched) if it never settles: about 4 restarts
-: "${WS_CARD_WAIT_S:=5}"         # after the stop, how long the panel may stay held
-: "${WS_READY_TIMEOUT_S:=30}"    # start-up watchdog: no ready file this long after exec -> SIGKILL (0 disables)
-: "${WS_RETRY_WINDOW_S:=20}"     # an early failure within this window may be retried once
-: "${WS_REFRESH_S:=60}"          # the 15 min wakelock is rewritten this often while the app runs
-: "${WS_APP_TERM_WAIT_S:=3}"     # cleanup: how long the app gets to drain after TERM
-: "${WS_HELPER_WAIT_S:=10}"      # cleanup and retry: how long the app and WPE helpers get to disappear
-: "${WS_STOP_DEADLINE_S:=20}"    # cleanup step 2 as a whole ends this long after it starts, whatever the app does
-: "${WS_SYSTEMD_RUN:=systemd-run}" # what appload-entry.sh runs (the host tests point it at a missing path)
+ws_defaults() { # every setting that is unset or empty gets its default (ws_validate_numbers runs it again)
+  : "${WS_RUN:=/run/wifi-signin}"
+  : "${WS_APP:=/home/root/xovi/exthome/appload/wifi-signin}"
+  : "${WS_RUNTIME:=/home/root/.vellum/share/rmweb-runtime}"
+  : "${WS_USERDIR:=/home/root/.wifi-signin}"
+  : "${WS_SYSPOWER:=/sys/power}"
+  : "${WS_PROC:=/proc}"
+  : "${WS_EPD_LOCK:=/tmp/epframebuffer.lock}"
+  : "${WS_CARD:=/dev/dri/card0}"
+  : "${WS_LIBEXEC:=/usr/libexec}"
+  : "${WS_GUARD_S:=30}"            # xochitl must have run this long before we stop it
+  : "${WS_GUARD_MAX_S:=180}"       # give up (exit 12, xochitl untouched) if it never settles: about 4 restarts
+  : "${WS_CARD_WAIT_S:=5}"         # after the stop, how long the panel may stay held
+  : "${WS_READY_TIMEOUT_S:=30}"    # start-up watchdog: no ready file this long after exec -> SIGKILL (0 disables)
+  : "${WS_RETRY_WINDOW_S:=20}"     # an early failure within this window may be retried once
+  : "${WS_REFRESH_S:=60}"          # the 15 min wakelock is rewritten this often while the app runs
+  : "${WS_APP_TERM_WAIT_S:=3}"     # cleanup: how long the app gets to drain after TERM
+  : "${WS_HELPER_WAIT_S:=10}"      # cleanup and retry: how long the app and WPE helpers get to disappear
+  : "${WS_STOP_DEADLINE_S:=20}"    # cleanup step 2 as a whole ends this long after it starts, whatever the app does
+  : "${WS_SYSTEMD_RUN:=systemd-run}" # what appload-entry.sh runs (the host tests point it at a missing path)
+}
+ws_defaults
 export WS_RUN WS_APP WS_RUNTIME WS_USERDIR WS_SYSPOWER WS_PROC WS_EPD_LOCK WS_CARD WS_LIBEXEC WS_GUARD_S \
   WS_GUARD_MAX_S WS_CARD_WAIT_S WS_READY_TIMEOUT_S WS_RETRY_WINDOW_S WS_REFRESH_S WS_APP_TERM_WAIT_S \
   WS_HELPER_WAIT_S WS_STOP_DEADLINE_S WS_SYSTEMD_RUN
@@ -36,6 +39,22 @@ export PATH
 
 # ws_log MSG: one journal line (stdout of a systemd service goes to the journal).
 ws_log() { printf '[wifi-signin] %s\n' "$*"; }
+
+# ws_validate_numbers: launch and cleanup run it right after launch.env. A number of seconds that is not plain
+# decimal (empty, "20s", "abc", or a leading 0 that $(( )) reads as octal) goes back to its default, with a WARN:
+# dash and BusyBox ash abort the whole script on $(( 20s * 100 )), and cleanup must still reach xochitl's start.
+# shellcheck disable=SC2154  # _ws_v and _ws_d are assigned through eval
+ws_validate_numbers() {
+  for _ws_k in WS_GUARD_S WS_GUARD_MAX_S WS_CARD_WAIT_S WS_READY_TIMEOUT_S WS_RETRY_WINDOW_S WS_REFRESH_S \
+      WS_APP_TERM_WAIT_S WS_HELPER_WAIT_S WS_STOP_DEADLINE_S; do
+    eval "_ws_v=\${$_ws_k-}"
+    case $_ws_v in '' | *[!0-9]* | 0?*) ;; *) continue ;; esac
+    eval "$_ws_k="
+    ws_defaults
+    eval "_ws_d=\$$_ws_k"
+    ws_log "WARN: $_ws_k='$_ws_v' is not a whole number of seconds: using $_ws_d"
+  done
+}
 
 # ws_state_add TOKEN / ws_state_has TOKEN: the session's undo list, one token per line in $WS_RUN/state.
 # Tokens: WAKELOCK, TRIPLETAP, STOPPED_XOCHITL, MOUNTED, APP=<pid>. ws_state_add fails quietly (a full or

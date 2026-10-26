@@ -637,6 +637,34 @@ rc_is 0
 count_is "app run" 1; in_order "app run" "app TERM"; restored
 jnowant "no ready file"; jwant "[wifi-signin] exit 0 (SIGTERM drain)"; gone; common
 
+setup bad_numbers_in_launch_env_fall_back
+# A typo in the dev override file: dash and BusyBox ash abort a whole script on $(( 20s * 100 )), so cleanup would
+# die before xochitl's start. launch and cleanup (which reads launch.env again) each put every bad number back to
+# its default with a WARN. xochitl is 5 s old: the default 30 s guard waits 25 s.
+printf 'WS_STOP_DEADLINE_S=20s\nWS_GUARD_S=abc\nWS_APP_TERM_WAIT_S=08\n' > "$APP/launch.env"
+WST="$T" "$T/lib/mkstat" 4242 10000; printf '105.00 90.00\n' > "$PROC/uptime"
+run "$APP/launch"
+rc_is 20
+count_is "app run" 1; restored; want "xochitl stopped at age 30 (pid 4242)"
+n=$(between_count "systemctl stop xovi-tripletap" "systemctl stop xochitl" "sleep 1")
+[ "$n" = 25 ] || fail "guard slept $n s, want 25 (the 30 s default)"
+for kv in "WS_STOP_DEADLINE_S='20s' is not a whole number of seconds: using 20" \
+    "WS_GUARD_S='abc' is not a whole number of seconds: using 30" \
+    "WS_APP_TERM_WAIT_S='08' is not a whole number of seconds: using 3"; do
+  n=$(grep -cF "WARN: $kv" "$JOURNAL")
+  [ "$n" = 2 ] || fail "journal has 'WARN: $kv' $n times, want 2 (launch and cleanup)"
+done
+jwant "[wifi-signin] exit 20 (online)"; gone; common
+
+setup bad_stop_deadline_cleanup_still_restores
+printf 'WS_STOP_DEADLINE_S=20s\n' > "$APP/launch.env"   # launch never uses it: only cleanup's $(( )) would abort
+run "$APP/launch"
+rc_is 20
+count_is "app run" 1; restored; count_is "systemctl start xochitl" 1
+n=$(grep -cF "WARN: WS_STOP_DEADLINE_S='20s' is not a whole number of seconds: using 20" "$JOURNAL")
+[ "$n" = 2 ] || fail "journal has the WS_STOP_DEADLINE_S warning $n times, want 2"
+jwant "cleanup done"; gone; common
+
 setup tripletap_still_active_after_stop_refuses
 # The stop fails and xovi-tripletap keeps running: a triple press would then restart xochitl over the app.
 : > "$T/units/xovi-tripletap.stopfail"
