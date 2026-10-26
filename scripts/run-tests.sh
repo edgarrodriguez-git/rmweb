@@ -29,12 +29,14 @@ ran="$(sed -n -E 's/^Ran ([0-9]+) tests? in .*/\1/p' build/fake-portal-tests.log
 summary="$(sed -n -E '/^(OK|FAILED)( |$)/p' build/fake-portal-tests.log | tail -n 1)"
 skipped="$(printf '%s\n' "$summary" | sed -n -E 's/.*skipped=([0-9]+).*/\1/p')"
 echo "[tests] fake-portal unittest: ran ${ran:-0} tests, ${skipped:-0} skipped"
-# Optional lint of the shipped shell (skip cleanly if shellcheck isn't installed).
+# Lint of the shipped shell: skips cleanly if shellcheck isn't installed, except under CI, where it fails.
 if command -v shellcheck >/dev/null 2>&1; then
   for f in device/rmweb device/rmweb-env.sh device/install.sh device/wifi-signin/lib.sh \
       device/wifi-signin/appload-entry.sh device/wifi-signin/launch device/wifi-signin/cleanup; do
     [ -e "$f" ] && { shellcheck -s sh "$f" || { echo "FAIL (shellcheck): $f"; fail=1; }; }
   done
+elif [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+  echo "FAIL (shellcheck): shellcheck not found, and under CI the shell lint must run, not skip"; fail=1
 else
   echo "[tests] shellcheck not found — skipping shell lint"
 fi
