@@ -2,8 +2,9 @@
 // numbers, surnames, voucher codes and session tokens, and the on-flash log must never hold page content, form data or
 // credentials:
 //   redactLogLine() filters ONE log line before it is written. It drops, whole, every line that carries page content
-//                   (see kDroppedLogTags below), cuts every scheme://... URL down to scheme://host[:port] and every opaque
-//                   data:/javascript:/mailto:/... URL down to scheme: (see kLogRedactOpaqueSchemes);
+//                   (see kDroppedLogTags below), cuts every scheme://... URL down to scheme://host[:port] (or to
+//                   scheme:// alone, see logRedactIsUserinfo) and every opaque data:/javascript:/mailto:/... URL down to
+//                   scheme: (see kLogRedactOpaqueSchemes);
 //   RotatingLog     is the size-capped file the filtered lines go to (one rotation, path -> path.1).
 // Standard library plus POSIX open/fstat/write/rename only — no Qt — so it is unit-tested off-device. The app's Qt
 // message handler (Task 13) calls both: redactLogLine() first, RotatingLog::append() on whatever survives.
@@ -247,7 +248,8 @@ inline constexpr const char* kDroppedLogTags[] = {"[form]", "setFieldText", "[me
                                                   "[t] page JS done"};
 
 // Filters one log line. nullopt = drop the line (it carries one of kDroppedLogTags); otherwise the line with every URL
-// reduced to scheme://host[:port], or to scheme: for an opaque one.
+// reduced to scheme://host[:port] (scheme:// when the host cannot be told from text around it), or to scheme: for an
+// opaque one.
 inline std::optional<std::string> redactLogLine(const std::string& line) {
     for (const char* tag : kDroppedLogTags) {
         if (line.find(tag) != std::string::npos) return std::nullopt;
