@@ -899,6 +899,7 @@ EOF
     rc_is 12
     want "state frozen after MOUNTED"; jwant "could not record APP="; jwant "[wifi-signin] exit 12 (display busy)"
     restored
+    jnowant "survived kill -9"; jnowant "(unrecorded) APP="   # launch collected it: nothing is left to cleanup
     for p in $(cat "$T/app.pids" 2>/dev/null); do
       if kill -0 "$p" 2>/dev/null; then fail "the app (pid $p) outlived the refusal"; fi
     done
