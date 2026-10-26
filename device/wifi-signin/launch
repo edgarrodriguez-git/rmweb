@@ -258,17 +258,20 @@ app_ended() { ! kill -0 "$APP_PID" 2>/dev/null; }
 # more. No identity check: APP_PID is our own child, so its PID stays ours until the shell reaps it, which is also
 # when kill -0 stops finding it. Clears APP_PID once the app is collected; one that survives kill -9 is left to
 # cleanup, which leave hands its PID.
+# stderr goes to /dev/null only where bash can print its "Killed" job notice for the app: the first settle that
+# runs once the app is gone, and the wait. A signal trap that runs under such a redirect sends cleanup's stderr
+# there too, so the TERM wait keeps stderr: bash prints no notice for TERM, which launch traps.
 stop_unrecorded_app() {
   kill -TERM "$APP_PID" 2>/dev/null
   if ! ws_wait_for "$WS_APP_TERM_WAIT_S" app_ended; then
     ws_log "WARN: the unrecorded app is still running ${WS_APP_TERM_WAIT_S} s after TERM: kill -9"
     kill -9 "$APP_PID" 2>/dev/null
-    if ! ws_wait_for "$WS_HELPER_WAIT_S" app_ended; then
+    if ! ws_wait_for "$WS_HELPER_WAIT_S" app_ended 2>/dev/null; then
       ws_log "WARN: the unrecorded app survived kill -9 (stuck in the kernel?): leaving it to cleanup"
       return 0
     fi
   fi
-  wait "$APP_PID"
+  wait "$APP_PID" 2>/dev/null
   APP_PID=
 }
 
@@ -290,10 +293,10 @@ run_app() { # one run; sets APP_RC and APP_CS
   if ! ws_state_add "APP=$APP_PID"; then
     # cleanup knows an app only by its command line (ws_app_alive), which is still launch's until the exec, so
     # launch stops this one itself, whether or not its exec shows within the 1 s wait (an exec under way still
-    # gets the TERM drain). stderr off: bash's job notice for a child that TERM or kill -9 ends.
+    # gets the TERM drain).
     ws_log "could not record APP=$APP_PID in $WS_RUN/state: stopping the app"
     ws_wait_cs 100 app_execed
-    stop_unrecorded_app 2>/dev/null
+    stop_unrecorded_app
     refuse 12 "not going on without a record of the app"
   fi
   ws_log "app started (pid $APP_PID)"

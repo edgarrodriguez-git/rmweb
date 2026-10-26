@@ -932,6 +932,37 @@ EOF
     [ ! -s "$PROC/mounts" ] || fail "an overlay is still mounted: $(cat "$PROC/mounts")"
     gone; common
   done
+
+  # A TERM to launch while it stops an unrecorded app (in the 3 s wait after its TERM, which the stubborn app
+  # ignores) runs cleanup from the trap, inside stop_unrecorded_app. cleanup's stderr must still reach the journal:
+  # the umount hook writes a marker there. No bash job notice ("Killed", "Terminated") may: common() checks the
+  # prefix of every journal line, and cleanup's kill -9 ends the app here.
+  setup signal_during_unrecorded_app_stop_keeps_cleanup_stderr
+  echo MOUNTED > "$T/freeze_after"
+  ENVX=(APP_MODE=stubborn)
+  cat > "$T/hooks/after_usleep" <<'EOF'
+#!/bin/sh
+# once the state is frozen, a settle returns only after the app's ready file (it ignores TERM by then); once the
+# app has ignored launch's TERM, TERM launch, once
+grep -q '^state frozen after' "$WST/stub.log" || exit 0
+i=0
+while [ "$i" -lt 100 ] && [ ! -e "$WST/run/wifi-signin/ready" ]; do /bin/sleep 0.05; i=$((i + 1)); done
+if grep -qxF 'app TERM ignored' "$WST/stub.log" && [ ! -e "$WST/launch.termed" ]; then
+  : > "$WST/launch.termed"; echo "TERM to launch" >> "$WST/stub.log"; kill -TERM "$(cat "$WST/run/wifi-signin/pid")"
+fi
+EOF
+  printf '#!/bin/sh\necho "[wifi-signin] stderr of cleanup reached the journal" >&2\n' > "$T/hooks/after_umount"
+  chmod +x "$T/hooks/after_usleep" "$T/hooks/after_umount"
+  start_bg "$APP/launch"; wait_bg 20
+  rc_is 137                                       # the app's own end: cleanup's kill -9
+  want "state frozen after MOUNTED"; jwant "could not record APP="
+  in_order "app run" "app TERM ignored" "TERM to launch" "umount $LIBEXEC"; restored
+  jwant "caught SIGTERM"; jwant "(unrecorded) APP="; jwant "WARN: the app or WPE helpers remain after 10 s: kill -9"
+  jwant "[wifi-signin] stderr of cleanup reached the journal"
+  for p in $(cat "$T/app.pids" 2>/dev/null); do
+    if kill -0 "$p" 2>/dev/null; then fail "the app (pid $p) outlived the session"; fi
+  done
+  gone; common
 fi
 
 setup guard_gives_up_on_a_stuck_xochitl
