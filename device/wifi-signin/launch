@@ -258,9 +258,11 @@ app_ended() { ! kill -0 "$APP_PID" 2>/dev/null; }
 # more. No identity check: APP_PID is our own child, so its PID stays ours until the shell reaps it, which is also
 # when kill -0 stops finding it. Clears APP_PID once the app is collected; one that survives kill -9 is left to
 # cleanup, which leave hands its PID.
-# stderr goes to /dev/null only where bash can print its "Killed" job notice for the app: the first settle that
-# runs once the app is gone, and the wait. A signal trap that runs under such a redirect sends cleanup's stderr
-# there too, so the TERM wait keeps stderr: bash prints no notice for TERM, which launch traps.
+# stderr goes to /dev/null only where bash can print its "Killed" job notice for the app: the whole wait after
+# kill -9 (up to WS_HELPER_WAIT_S) and the final wait. A signal trap that runs under such a redirect sends
+# cleanup's stderr there too, so a TERM during the wait after kill -9 still loses cleanup's stderr (diagnostics
+# only). The TERM wait keeps stderr: bash prints no notice for TERM, which launch traps, though a crash of the
+# app during it may log bash's own notice, which is worth having.
 stop_unrecorded_app() {
   kill -TERM "$APP_PID" 2>/dev/null
   if ! ws_wait_for "$WS_APP_TERM_WAIT_S" app_ended; then
