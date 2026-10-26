@@ -100,13 +100,14 @@ private:
     bool m_dquote = false, m_squote = false;
 };
 
-// Opaque URLs — a scheme, ':' and no "//" — of these schemes are cut down to "scheme:" (R29). data, javascript and
-// vbscript carry free text (HTML, script) that WebKit leaves unencoded in an opaque path, spaces included, so their tail
-// runs to the end of the line; the others are addresses and end at whitespace like a scheme:// tail. Names in lower case.
+// Opaque URLs — a scheme, ':' and no "//" — of these schemes are cut down to "scheme:" (R29). WebKit leaves an opaque
+// path unencoded, raw spaces included ("data:text/html,Mr Smith", "tel:+44 20 7946 0123", "mailto:Joe Smith <joe@...>"),
+// so their tail runs to the end of the line, any text after the URL on that line included. blob: URLs are made by the
+// browser and hold no spaces: that tail ends at whitespace like a scheme:// tail. Names in lower case.
 struct LogRedactOpaqueScheme { const char* name; std::size_t len; bool toLineEnd; };
 inline constexpr LogRedactOpaqueScheme kLogRedactOpaqueSchemes[] = {
     {"data", 4, true}, {"javascript", 10, true}, {"vbscript", 8, true},
-    {"mailto", 6, false}, {"blob", 4, false}, {"tel", 3, false}, {"sms", 3, false}};
+    {"mailto", 6, true}, {"blob", 4, false}, {"tel", 3, true}, {"sms", 3, true}};
 inline constexpr std::size_t kLogRedactOpaqueMaxLen = 10;   // "javascript"
 
 // The listed opaque scheme that ends at the ':' at s[colon], or nullptr. The whole run of scheme characters right before

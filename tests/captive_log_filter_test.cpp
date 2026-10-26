@@ -144,23 +144,30 @@ int main() {
 
     // ---- redactLogLine: opaque URLs of a fixed scheme list keep only "scheme:" (R29) ----
     CHECK(red("[nav] uri=data:text/html,<b>Welcome Mr Smith room 412</b>") == "[nav] uri=data:");
-    CHECK(red("[nav] load failed: mailto:joe.smith@hotel.example (unsupported)") == "[nav] load failed: mailto: (unsupported)");
+    // (the brief's "mailto: (unsupported)": an address tail now runs to the end of the line too, error text included)
+    CHECK(red("[nav] load failed: mailto:joe.smith@hotel.example (unsupported)") == "[nav] load failed: mailto:");
     CHECK(red("javascript:alert(document.cookie)") == "javascript:");
     CHECK(red("(mailto:a@b.c)") == "(mailto:)");
     // every listed scheme, ASCII case-insensitive; the scheme is kept as written
     CHECK(red("a vbscript:msgbox(1) b") == "a vbscript:");
     CHECK(red("a blob:https://h.x/550e8400-e29b b") == "a blob: b");
-    CHECK(red("a tel:+1-555-0100 b") == "a tel: b");
-    CHECK(red("a sms:+15550100?body=room%20412 b") == "a sms: b");
+    CHECK(red("a tel:+1-555-0100 b") == "a tel:");
+    CHECK(red("a sms:+15550100?body=room%20412 b") == "a sms:");
     CHECK(red("DATA:text/plain,x") == "DATA:");
     CHECK(red("[nav] uri=JavaScript:void(0)") == "[nav] uri=JavaScript:");
-    CHECK(red("MailTo:x@y.z end") == "MailTo: end");
-    // data, javascript and vbscript carry free text that WebKit leaves unencoded (spaces included) in an opaque path,
-    // so their tail runs to the end of the line; the address schemes end at whitespace like a scheme:// tail
+    CHECK(red("MailTo:x@y.z end") == "MailTo:");
+    // WebKit leaves raw spaces in an opaque path ("tel:+44 20 7946 0123", "mailto:Joe Smith <joe@...>"), so every tail
+    // but blob:'s runs to the end of the line; blob: URLs are browser-made and end at whitespace like a scheme:// tail
     CHECK(red("[nav] uri=javascript:alert('Mr Smith, room 412')") == "[nav] uri=javascript:");
     CHECK(red("[nav] uri=data:text/plain,Mr Smith\nnext line") == "[nav] uri=data:\nnext line");
     CHECK(red("[nav] uri=data:a b\r\nnext") == "[nav] uri=data:\r\nnext");
-    CHECK(red("a mailto:x@y.z b tel:+1555 c") == "a mailto: b tel: c");
+    CHECK(red("a mailto:x@y.z b tel:+1555 c") == "a mailto:");
+    CHECK(red("[nav] load failed: tel:+44 20 7946 0123 (x)") == "[nav] load failed: tel:");
+    CHECK(red("[nav] load failed: mailto:Joe Smith <joe.smith@hotel.example> (x)") == "[nav] load failed: mailto:");
+    CHECK(red("[nav] uri=sms:+1 555 0100?body=Room%20412") == "[nav] uri=sms:");
+    CHECK(red("[nav] uri=mailto:Joe Smith\nnext line") == "[nav] uri=mailto:\nnext line");
+    CHECK(red("(mailto:Joe Smith <j@h.x>)") == "(mailto:)");                     // R14 closer, end-of-line tail
+    CHECK(red("a blob:https://h.x/x b tel:+1555 c") == "a blob: b tel:");
     CHECK(red("(see data:text/plain,x)") == "(see data:)");                       // R14 closer, end-of-line tail
     CHECK(red("(data:a b) end") == "(data:");                                     // the cost: glued prose goes too
     // token boundary: start of the string or a character that is not alphanumeric and not + - .
@@ -185,15 +192,18 @@ int main() {
     CHECK(red("data://h.x/p?q") == "data://h.x");
     CHECK(red("https://h.x/?next=javascript:alert(1) end") == "https://h.x end");
     CHECK(red("https://u:data:x@h.x/p") == "https://h.x");
-    CHECK(red("mailto:a@b.c https://h.x/p?q") == "mailto: https://h.x");
+    CHECK(red("https://h.x/p?q mailto:a@b.c") == "https://h.x mailto:");
+    CHECK(red("blob:x https://h.x/p?q") == "blob: https://h.x");
     // linear time: long lines full of colons, near misses and URLs, each URL inside a still-open '(' (a rescan per match
     // or a look-behind per URL takes tens of seconds here; one forward pass takes milliseconds)
     {
         std::string big, want;
         for (int k = 0; k < 40000; ++k) {
-            big += "metadata:x a:b:c:d mailto:u@h.x tel:+1555 (a mailto:x) (a http://u:p@h.x/p?q) ";
-            want += "metadata:x a:b:c:d mailto: tel: (a mailto:) (a http://h.x) ";
+            big += "metadata:x a:b:c:d blob:u@h.x data: 5 (a blob:x) (a http://u:p@h.x/p?q) ";
+            want += "metadata:x a:b:c:d blob: data: 5 (a blob:) (a http://h.x) ";
         }
+        big += "(a mailto:u@h.x tel:+1555)";                  // an end-of-line tail, still inside the first '('
+        want += "(a mailto:)";
         const auto t0 = std::chrono::steady_clock::now();
         const std::string got = red(big);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
