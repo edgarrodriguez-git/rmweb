@@ -4,12 +4,13 @@
 # xochitl's cgroup, so stopping xochitl cannot kill it. Spec: docs/wifi-signin/design.md section 6, steps 1-8;
 # the hazards it handles are listed in section 3.
 #
-# Each step appends a token to $WS_RUN/state, and cleanup undoes only what is recorded. TRIPLETAP,
+# Each step appends a token to $WS_RUN/state, and cleanup undoes only what is recorded. WAKELOCK, TRIPLETAP,
 # STOPPED_XOCHITL and MOUNTED are written just BEFORE their action: sh runs a trap only once the foreground
 # command returns, so a TERM (or a SIGKILL) landing during `systemctl stop xochitl` must still find the token,
 # or nothing would start xochitl again. Recording early is safe because cleanup re-checks the real state before
 # each undo: it starts tripletap (a no-op if it runs), starts xochitl only if it is not active, and unmounts
-# only an overlay that /proc/mounts shows as ours.
+# only an overlay that /proc/mounts shows as ours. A token that cannot be recorded refuses 12 before its action,
+# and an app whose PID cannot be recorded is stopped at once: nothing runs unrecorded.
 #
 # Exit code: the app's (after cleanup), 11 if another session holds the lock, 12 for every other refusal (the
 # log line before it says which).
@@ -34,6 +35,7 @@ APP_PID=        # the app while it runs (a child of ours, not yet reaped)
 APP_RC=
 APP_CS=0        # how long the last run lasted, in centiseconds of the boot clock
 LOGGED_RC=
+REFUSED=
 REFRESH_PID=
 WATCH_PID=
 
@@ -46,8 +48,9 @@ reap() { # stop one of our background loops and reap it
   return 0
 }
 
-# Step 8, the single exit path: stop our loops, run cleanup if the lock is ours, then exit with $1, or with the
-# app's own code if a signal arrived while it ran (cleanup has stopped it by then).
+# Step 8, the single exit path: stop our loops, run cleanup if the lock is ours (with the app's PID from memory,
+# in case the state file could not record it), then exit with $1, or with the app's own code if a signal arrived
+# while it ran (cleanup has stopped it by then). A refusal keeps its own code.
 leave() {
   [ -n "$LEAVING" ] && return 0
   LEAVING=1
@@ -57,9 +60,9 @@ leave() {
   reap "$REFRESH_PID"; REFRESH_PID=        # before cleanup rewrites or drops the wakelock
   if [ -n "$ARMED" ]; then
     if [ -n "$APP_PID" ] && ! ws_state_has "APP=$APP_PID"; then ws_state_add "APP=$APP_PID"; fi
-    "$WS_APP/cleanup" trap
+    "$WS_APP/cleanup" trap ${APP_PID:+"$APP_PID"}
   fi
-  if [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then
+  if [ -z "$REFUSED" ] && [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then
     wait "$APP_PID" 2>/dev/null
     rc=$?
   fi
@@ -69,6 +72,7 @@ leave() {
 }
 
 refuse() { # refuse CODE WHY
+  REFUSED=1
   ws_log "$2"
   log_exit "$1"
   leave "$1"
@@ -109,15 +113,14 @@ ARMED=1
 # --- Step 2: wakelock, before tripletap or xochitl is touched ---------------------------------------------
 # A 15 min timed lock: with xochitl stopped nothing else holds one, and kernel autosleep would suspend the
 # device (a resume can start a second xochitl over the app). Timed, so it expires even if everything is killed.
-if ws_wakelock "wifi-signin 900000000000"; then
-  ws_state_add WAKELOCK
-else
+ws_state_add WAKELOCK || refuse 12 "could not record WAKELOCK in $WS_RUN/state: not taking the wakelock"
+if ! ws_wakelock "wifi-signin 900000000000"; then
   refuse 12 "could not take the wakelock ($WS_SYSPOWER/wake_lock): not touching tripletap or xochitl"
 fi
 
 # --- Step 3: tripletap (a triple power press would restart xochitl over the app) ------------------------------
 if systemctl is-active --quiet xovi-tripletap; then
-  ws_state_add TRIPLETAP
+  ws_state_add TRIPLETAP || refuse 12 "could not record TRIPLETAP in $WS_RUN/state: not stopping xovi-tripletap"
   systemctl stop xovi-tripletap || ws_log "WARN: systemctl stop xovi-tripletap failed"
   if systemctl is-active --quiet xovi-tripletap; then   # TRIPLETAP is recorded: cleanup's start is a no-op
     refuse 12 "xovi-tripletap is still active after the stop: not stopping xochitl"
@@ -166,7 +169,7 @@ done
 if [ "$st" != active ]; then
   refuse 12 "xochitl is ${st:-unknown}, not active: another program owns the display"
 fi
-ws_state_add STOPPED_XOCHITL
+ws_state_add STOPPED_XOCHITL || refuse 12 "could not record STOPPED_XOCHITL in $WS_RUN/state: not stopping xochitl"
 ws_log "stopping xochitl (pid $pid, ${age} s old)"
 systemctl stop xochitl || ws_log "WARN: systemctl stop xochitl failed"
 if systemctl is-active --quiet xochitl; then
@@ -186,7 +189,7 @@ if ! { mkdir -p "$WS_RUN/ovl/upper/wpe-webkit-2.0" "$WS_RUN/ovl/work" &&
        cp -a "$WS_RUNTIME/libexec/wpe-webkit-2.0/." "$WS_RUN/ovl/upper/wpe-webkit-2.0/"; }; then
   refuse 12 "could not copy the WPE helpers from $WS_RUNTIME/libexec: not launching"
 fi
-ws_state_add MOUNTED
+ws_state_add MOUNTED || refuse 12 "could not record MOUNTED in $WS_RUN/state: not mounting the overlay"
 if ! mount -t overlay overlay -o "lowerdir=$WS_LIBEXEC,upperdir=$WS_RUN/ovl/upper,workdir=$WS_RUN/ovl/work" \
     "$WS_LIBEXEC"; then
   refuse 12 "the overlay mount on $WS_LIBEXEC failed: not launching"
@@ -230,6 +233,9 @@ start_watchdog() { # no ready file WS_READY_TIMEOUT_S after exec: SIGKILL the ap
   WATCH_PID=$!
 }
 
+# shellcheck disable=SC2329  # called through ws_wait_cs
+app_execed() { ws_app_alive "$APP_PID" || ! kill -0 "$APP_PID" 2>/dev/null; }
+
 run_app() { # one run; sets APP_RC and APP_CS
   rm -f "$READY" "$WS_RUN/watchdog"
   t0=$(ws_uptime_cs) || t0=0
@@ -245,7 +251,12 @@ run_app() { # one run; sets APP_RC and APP_CS
     exec "$WS_APP/bin/wifi-signin-wpeqt"
   ) 2>"$WS_RUN/stderr" &
   APP_PID=$!
-  ws_state_add "APP=$APP_PID"
+  if ! ws_state_add "APP=$APP_PID"; then
+    # Stopped through cleanup, which leave hands the PID. Its exec must show in its command line first (at most
+    # 1 s), or cleanup's identity check (ws_app_alive) would not know it as the app yet.
+    ws_wait_cs 100 app_execed
+    refuse 12 "could not record APP=$APP_PID in $WS_RUN/state: stopping the app"
+  fi
   ws_log "app started (pid $APP_PID)"
   start_watchdog
   wait "$APP_PID" 2>/dev/null       # (bash would print a "Killed" job notice into the journal)

@@ -38,8 +38,9 @@ export PATH
 ws_log() { printf '[wifi-signin] %s\n' "$*"; }
 
 # ws_state_add TOKEN / ws_state_has TOKEN: the session's undo list, one token per line in $WS_RUN/state.
-# Tokens: WAKELOCK, TRIPLETAP, STOPPED_XOCHITL, MOUNTED, APP=<pid>.
-ws_state_add() { printf '%s\n' "$1" >> "$WS_RUN/state"; }
+# Tokens: WAKELOCK, TRIPLETAP, STOPPED_XOCHITL, MOUNTED, APP=<pid>. ws_state_add fails quietly (a full or
+# broken /run); every caller refuses rather than act unrecorded.
+ws_state_add() { { printf '%s\n' "$1" >> "$WS_RUN/state"; } 2>/dev/null; }
 ws_state_has() { grep -qxF -- "$1" "$WS_RUN/state" 2>/dev/null; }
 
 # ws_settle MICROSECONDS: usleep; where there is none, a fractional sleep (upstream device/rmweb relies on

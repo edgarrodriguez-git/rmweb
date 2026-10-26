@@ -14,6 +14,8 @@
 #     start, or started while an app or WPE helper is alive, or over the EPD lock. Every case requires none.
 #   - /proc/<pid>/{stat,cmdline,fd/} and /proc/{uptime,mounts} are plain files; mount and umount edit
 #     proc/mounts.
+#   - A full or broken /run: freeze_after names the state token after which the state file turns read-only (the
+#     systemctl, mount and chmod stubs check it; chmod is the real one plus that check).
 #   - /sys/power/wake_lock and wake_unlock are symlinks to stub.log, so every write lands in order among the
 #     stub calls ("wifi-signin 900000000000", "wifi-signin-exit 30000000000", or "wifi-signin" for an unlock).
 #     locks_held_after replays them with the kernel's rule: a timed lock is only ever extended (R27).
@@ -66,6 +68,7 @@ write_stubs(){
 # stub systemctl: unit state in $WST/units; HAZARD lines for what would hurt a real tablet
 L="$WST/stub.log"; U="$WST/units"
 echo "systemctl $*" >> "$L"
+"$WST/lib/maybe_freeze"
 state() { cat "$U/$1.state" 2>/dev/null || echo inactive; }
 age() { # whole seconds since fake process $1 started: field 22 of its stat, parsed after the last ')'
   awk -v up="$(awk '{ print int($1) }' "$WST/proc/uptime")" \
@@ -122,6 +125,7 @@ EOF
 #!/bin/sh
 # stub mount: records the overlay in proc/mounts (mount.fail: fail; mount.foreign: someone else's upperdir)
 echo "mount $*" >> "$WST/stub.log"
+"$WST/lib/maybe_freeze"
 [ -e "$WST/mount.fail" ] && exit 32
 opts=; prev=; mp=
 for a in "$@"; do [ "$prev" = -o ] && opts=$a; prev=$a; mp=$a; done
@@ -162,6 +166,22 @@ s=$(awk -v u="$1" 'BEGIN { print u / 1000000 }')
 n=$(( $(cat "$WST/usleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WST/usleeps"
 if [ -x "$WST/hooks/after_usleep" ]; then "$WST/hooks/after_usleep" "$n"; fi
 exit 0
+EOF
+  cat > "$T/stubs/chmod" <<'EOF'
+#!/bin/sh
+# stub chmod: the real chmod, then a chance to freeze the state file (launch's only command between its lock and
+# its first state record)
+/bin/chmod "$@" || exit
+"$WST/lib/maybe_freeze"
+EOF
+  cat > "$T/lib/maybe_freeze" <<'EOF'
+#!/bin/sh
+# maybe_freeze: once the state file's last token is the one in $WST/freeze_after ("-": the file is still empty),
+# the state file turns read-only, so the launcher's next record fails (a full or broken /run)
+f="$WST/freeze_after"; s="$WST/run/wifi-signin/state"
+[ -f "$f" ] && [ -f "$s" ] || exit 0
+last=$(tail -n 1 "$s"); [ "$(cat "$f")" = "${last:--}" ] || exit 0
+/bin/chmod a-w "$s"; rm -f "$f"; echo "state frozen after ${last:--}" >> "$WST/stub.log"
 EOF
   cat > "$T/lib/advance" <<'EOF'
 #!/bin/sh
@@ -687,6 +707,38 @@ run "$APP/launch"
 rc_is 12
 nowant_re "xochitl"; nowant_re "tripletap"; nowant "app run"
 jwant "wakelock"; jwant "[wifi-signin] exit 12 (display busy)"; gone; common
+
+# Every token is recorded BEFORE its action (R24), so a record that fails (a full or broken /run) must refuse 12
+# without that action, and the refusal leaves nothing held. The state file turns read-only right after the named
+# token ("-": right after the lock, so WAKELOCK is the first record to fail).
+if [ "$(id -u)" = 0 ]; then
+  echo "  (state_record_fails cases skipped: root writes a read-only file anyway)"
+else
+  for tok in - WAKELOCK TRIPLETAP STOPPED_XOCHITL MOUNTED; do
+    setup "state_record_fails_after $tok"
+    echo "$tok" > "$T/freeze_after"
+    ENVX=(APP_MODE=online); [ "$tok" = MOUNTED ] && ENVX=(APP_MODE=hang)   # the app must not outlive the refusal
+    start_bg "$APP/launch"; wait_bg 20
+    rc_is 12
+    want "state frozen after $tok"; jwant "could not record"; jwant "[wifi-signin] exit 12 (display busy)"
+    case $tok in
+      -) nowant "wifi-signin 900000000000"; nowant "wifi-signin"; nowant_re "tripletap|xochitl" ;;
+      WAKELOCK) in_order "wifi-signin 900000000000" "wifi-signin"; nowant_re "(stop|start) (xovi-tripletap|xochitl)" ;;
+      TRIPLETAP) in_order "wifi-signin 900000000000" "systemctl stop xovi-tripletap" "wifi-signin" \
+                   "systemctl start xovi-tripletap"; nowant "systemctl stop xochitl"; nowant "systemctl start xochitl" ;;
+      STOPPED_XOCHITL) in_order "systemctl stop xochitl" "wifi-signin-exit 30000000000" "wifi-signin" \
+                         "systemctl reset-failed xochitl" "systemctl start xochitl" "systemctl start xovi-tripletap"
+                       nowant_re "^mount "; nowant "umount $LIBEXEC" ;;
+      MOUNTED) in_order "$(MOUNT_LINE)" "app run" "app TERM"; restored; count_is "app run" 1 ;;
+    esac
+    [ "$tok" = MOUNTED ] || nowant "app run"
+    [ "$(cat "$T/units/xochitl.state")" = active ] || fail "xochitl is $(cat "$T/units/xochitl.state") at the end"
+    [ "$(cat "$T/units/xovi-tripletap.state")" = active ] || fail "xovi-tripletap is not active at the end"
+    [ ! -s "$PROC/mounts" ] || fail "an overlay is still mounted: $(cat "$PROC/mounts")"
+    [ -z "$(locks_held_after 40)" ] || fail "wakelocks still held 40 s after the refusal: $(locks_held_after 40)"
+    gone; common
+  done
+fi
 
 setup guard_gives_up_on_a_stuck_xochitl
 echo activating > "$T/units/xochitl.state"

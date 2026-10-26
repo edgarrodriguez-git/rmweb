@@ -3,9 +3,10 @@
 # section 6, step 8. State-driven and idempotent: it undoes only what launch recorded in $WS_RUN/state,
 # re-checks the real state before each undo, and deletes $WS_RUN last, so a second run is a no-op.
 #
-#   cleanup trap   from launch's trap: acts only if $WS_RUN/pid is its parent, the launch that invoked it.
-#   cleanup post   from the unit's ExecStopPost (and from launch, on a stale lock): acts only if the
-#                  recorded launch is gone, killed before its own trap could finish (even by SIGKILL).
+#   cleanup trap [PID]  from launch's trap: acts only if $WS_RUN/pid is its parent, the launch that invoked it.
+#                       PID is the app launch holds in memory, stopped too if the state file could not record it.
+#   cleanup post        from the unit's ExecStopPost (and from launch, on a stale lock): acts only if the
+#                       recorded launch is gone, killed before its own trap could finish (even by SIGKILL).
 set -u
 
 WS_APP=${WS_APP:-/home/root/xovi/exthome/appload/wifi-signin}
@@ -20,7 +21,7 @@ trap '' TERM INT HUP                     # a repeated stop request must not inte
 mode=${1:-post}
 case $mode in
   trap | post) ;;
-  *) echo "usage: $0 trap|post" >&2; exit 2 ;;
+  *) echo "usage: $0 trap [APP_PID] | post" >&2; exit 2 ;;
 esac
 
 # 1. Is the recorded state ours to undo?
@@ -31,14 +32,18 @@ if [ "$mode" = trap ]; then
 elif [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
   exit 0                                 # that launch is alive: its own trap will clean up
 fi
-ws_log "cleanup ($mode): undoing $(tr '\n' ' ' < "$WS_RUN/state")"
+unrecorded=                              # trap mode: launch's in-memory app PID, when the state lacks it
+if [ "$mode" = trap ]; then
+  case ${2:-} in '' | *[!0-9]*) ;; *) ws_state_has "APP=$2" || unrecorded=$2 ;; esac
+fi
+ws_log "cleanup ($mode): undoing $(tr '\n' ' ' < "$WS_RUN/state")${unrecorded:+(unrecorded) APP=$unrecorded}"
 
 # 2. Stop the app (its TERM handler drains the panel), then the WPE helpers. The whole step has ONE deadline on
 #    the boot clock (WS_STOP_DEADLINE_S), so steps 3-7 are always reached about that long after cleanup starts,
 #    whatever the app does: a process stuck in the e-ink driver survives even SIGKILL, and an ExecStopPost run
 #    that systemd kills before step 4 would leave the tablet on a frozen frame. xochitl's start is then still
 #    covered by the EPD-lock removal and the settle in step 4.
-apps=$(sed -n 's/^APP=//p' "$WS_RUN/state")
+apps="$(sed -n 's/^APP=//p' "$WS_RUN/state") $unrecorded"
 apps_gone() { for p in $apps; do ws_app_alive "$p" && return 1; done; return 0; }
 # shellcheck disable=SC2329  # called through ws_wait_cs
 all_gone() { apps_gone && [ -z "$(ws_helper_pids)" ]; }
