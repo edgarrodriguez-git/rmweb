@@ -178,10 +178,10 @@ inline std::size_t logRedactCutTail(const std::string& s, std::size_t from, std:
 
 // Every "scheme://authority tail" becomes "scheme://host[:port]": userinfo (up to the LAST '@' before the authority's
 // / ? # or whitespace) and the whole tail are removed; when the text before that '@' cannot be userinfo
-// (logRedactIsUserinfo), the URL becomes "scheme://" with no host. Every opaque URL of kLogRedactOpaqueSchemes becomes "scheme:"
-// (an empty tail — the ':' followed by the end, a CR or LF — is prose and stays, and so is a tail that starts with a
-// space or tab unless the scheme's wsTail makes it a URL: "data: 5 bytes" stays). Text outside URLs is copied unchanged.
-// Linear in the length of s.
+// (logRedactIsUserinfo), the URL becomes "scheme://" with no host. Every opaque URL of kLogRedactOpaqueSchemes becomes
+// "scheme:" (an empty tail — the ':' followed by the end, a CR or LF — is prose and stays, and so is a tail that starts
+// with a space or tab unless the scheme's wsTail makes it a URL: "data: 5 bytes" stays). Text outside URLs is copied
+// unchanged. Linear in the length of s.
 inline std::string logRedactUrls(const std::string& s) {
     std::string out;
     out.reserve(s.size());
