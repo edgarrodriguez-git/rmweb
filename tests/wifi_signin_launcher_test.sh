@@ -27,9 +27,9 @@
 #   - A process that survives TERM and KILL (stuck in the e-ink driver on a tablet) is modelled by a zombie:
 #     kill -0 still finds it, and no signal removes it until its parent goes. APP_MODE=stubborn is a live app
 #     that ignores TERM, so only a kill -9 (cleanup's, or launch's for an unrecorded app) ends it.
-#   - The fake app (app/bin/wifi-signin-wpeqt) registers itself in the fake /proc and waits on a REAL
-#     /bin/sleep, so it never moves the clock. APP_MODE picks what it does; HELPER=1 also starts a fake
-#     WPEWebProcess.
+#   - The fake app (app/bin/wifi-signin-wpeqt) registers itself in the fake /proc (its TERM trap already set) and
+#     waits on a REAL /bin/sleep, so it never moves the clock. APP_MODE picks what it does; HELPER=1 also starts
+#     a fake WPEWebProcess.
 #
 # WS_TEST_SH=/bin/dash runs the scripts under another POSIX shell (their #! lines are rewritten in the copies).
 set -u
@@ -228,6 +228,11 @@ L="$WST/stub.log"
 echo "app run" >> "$L"; echo "$$" >> "$WST/app.pids"
 n=$(( $(cat "$WST/app.runs" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WST/app.runs"
 if [ -n "${APP_REGISTER_DELAY:-}" ]; then /bin/sleep "$APP_REGISTER_DELAY"; fi   # its exec not in /proc yet
+s=
+# Its TERM handler is set before it shows in /proc, so a TERM to a registered app always reaches it: the drain
+# (logs "app TERM", exits 0), or nothing at all for APP_MODE=stubborn. Before that, TERM ends it at once.
+if [ "${APP_MODE:-}" = stubborn ]; then trap 'echo "app TERM ignored" >> "$L"' TERM
+else trap 'echo "app TERM" >> "$L"; kill "$s" 2>/dev/null; exit 0' TERM; fi
 mkdir -p "$WS_PROC/$$"; printf '%s\000' "$0" > "$WS_PROC/$$/cmdline"
 [ -e "$WS_EPD_LOCK" ] && echo "HAZARD: app $n started over the EPD lock" >> "$L"
 : > "$WS_EPD_LOCK"
@@ -241,9 +246,7 @@ if [ "${HELPER:-}" = 1 ]; then
   echo "$h" >> "$WST/pids"; echo "$h" > "$WST/helper.pid"
   mkdir -p "$WS_PROC/$h"; printf '%s\000%s\000' /usr/libexec/wpe-webkit-2.0/WPEWebProcess 3 > "$WS_PROC/$h/cmdline"
 fi
-s=
-park() { # wait on a REAL sleep; TERM is the app's drain, which exits 0
-  trap 'echo "app TERM" >> "$L"; kill "$s" 2>/dev/null; exit 0' TERM
+park() { # wait on a REAL sleep; TERM is the app's drain (trapped above), which exits 0
   /bin/sleep 30 & s=$!
   echo "$s" >> "$WST/pids"
   wait "$s"; exit 0
@@ -266,8 +269,8 @@ case ${APP_MODE:-online} in
   evgrab) if [ "$n" = 1 ]; then echo '[touch] EVIOCGRAB failed after 5 attempts - cannot run ungrabbed, exiting' >&2; exit 1; fi
           ready; exit 20 ;;
   watchdog63) echo 'Failed to initialize SWTCON' >&2; exit 63 ;;
-  stubborn) # alive but deaf to TERM (from before its ready file): only a last-resort kill -9 ends it
-    trap 'echo "app TERM ignored" >> "$L"' TERM; ready
+  stubborn) # alive but deaf to TERM (trapped above): only a last-resort kill -9 ends it
+    ready
     /bin/sleep 30 & s=$!; echo "$s" >> "$WST/pids"
     while kill -0 "$s" 2>/dev/null; do wait "$s"; done; exit 0 ;;
 esac
