@@ -70,9 +70,10 @@ L="$WST/stub.log"; U="$WST/units"
 echo "systemctl $*" >> "$L"
 "$WST/lib/maybe_freeze"
 state() { cat "$U/$1.state" 2>/dev/null || echo inactive; }
-age() { # whole seconds since fake process $1 started: field 22 of its stat, parsed after the last ')'
-  awk -v up="$(awk '{ print int($1) }' "$WST/proc/uptime")" \
-    '{ s = $0; sub(/.*\)/, "", s); split(s, f, " "); print up - int(f[20] / 100) }' "$WST/proc/$1/stat"
+age() { # centiseconds since fake process $1 started: the boot clock minus field 22 of its stat (USER_HZ ticks,
+  # 100 a second), parsed after the last ')'
+  awk -v up="$(awk '{ printf "%d", $1 * 100 + 0.5 }' "$WST/proc/uptime")" \
+    '{ s = $0; sub(/.*\)/, "", s); split(s, f, " "); print up - f[20] }' "$WST/proc/$1/stat"
 }
 alive_matching() { # alive fake processes whose cmdline matches the ERE $1
   for c in "$WST"/proc/[0-9]*/cmdline; do
@@ -96,8 +97,8 @@ case $1 in
     if [ "$2" = xochitl ]; then
       pid=$(cat "$U/xochitl.mainpid" 2>/dev/null || echo 0)
       if [ -f "$WST/proc/$pid/stat" ]; then
-        a=$(age "$pid"); echo "xochitl stopped at age $a (pid $pid)" >> "$L"
-        [ "$a" -ge 30 ] || echo "HAZARD: xochitl stopped $a s after its start" >> "$L"
+        a=$(age "$pid"); echo "xochitl stopped at age $((a / 100)) (pid $pid)" >> "$L"
+        [ "$a" -ge 3000 ] || echo "HAZARD: xochitl stopped $a cs after its start" >> "$L"
       fi
       rm -rf "$WST/proc/$pid/fd"; echo 0 > "$U/xochitl.mainpid"
     fi
@@ -486,6 +487,16 @@ rc_is 20
 n=$(between_count "systemctl stop xovi-tripletap" "systemctl stop xochitl" "sleep 1")
 [ "$n" = 25 ] || fail "guard slept $n s, want 25"
 want "xochitl stopped at age 30 (pid 4242)"; nowant_re "ActiveEnterTimestamp"; gone; common
+
+setup guard_age_counts_centiseconds
+# xochitl started at 100.99 s (10099 ticks): at 130.00 s it is 29.01 s old, which flooring the two values apart
+# (130 - 100) would call 30. The stop must wait for 131.00 s, one more pass.
+WST="$T" "$T/lib/mkstat" 4242 10099; printf '105.00 90.00\n' > "$PROC/uptime"
+run "$APP/launch"
+rc_is 20
+n=$(between_count "systemctl stop xovi-tripletap" "systemctl stop xochitl" "sleep 1")
+[ "$n" = 26 ] || fail "guard slept $n s, want 26"
+want "xochitl stopped at age 30 (pid 4242)"; gone; common
 
 setup guard_restarts_on_new_mainpid
 WST="$T" "$T/lib/mkstat" 4242 10000; printf '105.00 90.00\n' > "$PROC/uptime"

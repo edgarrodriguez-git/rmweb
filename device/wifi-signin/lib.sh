@@ -119,18 +119,19 @@ ws_app_alive() {
 }
 
 # ws_xochitl_age: xochitl's age in whole seconds on the boot-time clock. MainPID from systemd; the start time
-# is field 22 of $WS_PROC/<pid>/stat (USER_HZ = 100 ticks since boot), counted after the LAST ')' because the
-# command name may itself contain ')'; now is the first field of $WS_PROC/uptime. Never compared with
-# ActiveEnterTimestampMonotonic, which stops while the device is suspended. Returns 1 if it cannot tell.
+# is field 22 of $WS_PROC/<pid>/stat (USER_HZ = 100 ticks since boot, so ticks are centiseconds), counted after
+# the LAST ')' because the command name may itself contain ')'; now is the first field of $WS_PROC/uptime. The
+# difference is taken in centiseconds and floored once (flooring both values first could call 29.01 s 30).
+# Never compared with ActiveEnterTimestampMonotonic, which stops while the device is suspended. Returns 1 if it
+# cannot tell.
 ws_xochitl_age() {
   _ws_pid=$(systemctl show -p MainPID --value xochitl 2>/dev/null)
   case $_ws_pid in '' | 0 | *[!0-9]*) return 1 ;; esac
   _ws_stat=$(cat "$WS_PROC/$_ws_pid/stat" 2>/dev/null) || return 1
   _ws_start=$(printf '%s\n' "${_ws_stat##*')'}" | awk '{ print $20 }')
   case $_ws_start in '' | *[!0-9]*) return 1 ;; esac
-  read -r _ws_up _ 2>/dev/null < "$WS_PROC/uptime" || return 1
-  case ${_ws_up%%.*} in '' | *[!0-9]*) return 1 ;; esac
-  echo $(( ${_ws_up%%.*} - _ws_start / 100 ))
+  _ws_now=$(ws_uptime_cs) || return 1
+  echo $(( (_ws_now - _ws_start) / 100 ))
 }
 
 # ws_exit_meaning CODE: the same strings as exitMeaning() in engine/wpeqt/captive/exit_codes.h.
