@@ -2,7 +2,7 @@
 
 Status: proposed, pending the owner's approval. `design.md` (revision 2) stays unchanged until the owner approves an entry. An approved entry then goes into a new revision of `design.md`, and this file records that.
 
-This file lists the places where the Part A code deliberately differs from the spec's literal text, plus two slips in the spec itself (E9, E22). The code was checked at `int/part-a` 571d532, which is `wifi-signin` with the final fix wave applied. Line numbers are those of `docs/wifi-signin/design.md` revision 2. The ruling IDs (R…) refer to the plan's SDD ledger, which is kept out of git, so each "Why" stands on its own.
+This file lists the places where the Part A code deliberately differs from the spec's literal text, plus two slips in the spec itself (E9, E22). The code was first checked at `int/part-a` 571d532, which is `wifi-signin` with the final fix wave applied, and checked again at `int/part-a` d092421, after the residual and final sync rounds. Line numbers are those of `docs/wifi-signin/design.md` revision 2. The ruling IDs (R…) refer to the plan's SDD ledger, which is kept out of git, so each "Why" stands on its own.
 
 E1 to E6 are the corrections the final review asked for. E7 to E22 are the remaining deliberate differences, in spec order.
 
@@ -13,9 +13,9 @@ E1 to E6 are the corrections the final review asked for. E7 to E22 are the remai
 | E3 | §6 step 4, line 300 | xochitl's age is computed in centiseconds | fix wave (Task 9 M5) |
 | E4 | §9 Privacy, line 465 | The privacy fixture includes a login form with a password | fix wave (R26) |
 | E5 | §5 Probe, lines 178, 201 | A non-http(s) Location counts as absent | R28 |
-| E6 | §5 Logging, line 267 | URL redaction: port, tail and opaque URLs | R12, R14, R29, R35 |
+| E6 | §5 Logging, line 267 | URL redaction: port, tail and opaque URLs | R12, R14, R29, R35, R36 |
 | E7 | §5 Logging, lines 268-269 | More line tags are dropped | R11, R13 |
-| E8 | §6 step 8.5, line 323 | When cleanup drops the 15-minute lock | R27 |
+| E8 | §6 step 8.5, line 323 | When cleanup drops the 15-minute lock | Task 9 as built; R34 |
 | E9 | §4 diagram, line 114 | The exit wakelock comes before xochitl's start | spec slip |
 | E10 | §5 exit codes, lines 255-256 | What exits 11 and 12 cover | R25 |
 | E11 | §6 intro, line 275 | The runtime's variables go to the app only | R25 |
@@ -61,6 +61,7 @@ E1 to E6 are the corrections the final review asked for. E7 to E22 are the remai
   - sh runs a trap only when the foreground command returns. A TERM or SIGKILL during `systemctl stop xochitl` would otherwise leave no `STOPPED_XOCHITL` token, and nothing would start xochitl again.
   - Recording early is safe because every undo re-checks the real state. xochitl is started only if it is not active, the overlay is unmounted only if `/proc/mounts` shows ours, and tripletap's start is idempotent.
   - A full or broken `/run` must not let a step run unrecorded.
+  - launch itself stops an app whose PID cannot be recorded, because cleanup knows an app only by its command line, and that is still launch's until the app's exec. launch needs no identity check for it: the app is launch's own child and not yet reaped, so its PID cannot have been reused.
   - The one cost is cosmetic, and R34 accepts it: when the wakelock write itself fails, cleanup's unlock of a lock that was never taken logs a spurious WARN.
 
 ### E3. §6 step 4: xochitl's age is computed in centiseconds
@@ -91,14 +92,17 @@ E1 to E6 are the corrections the final review asked for. E7 to E22 are the remai
 
 - **Where:** §5 "Override file and logging", line 267.
 - **The spec says:** "any URL is cut down to `scheme://host`;"
-- **Proposed:** "any `scheme://` URL is cut down to `scheme://host[:port]`: userinfo is removed, and so is everything after the authority up to the next whitespace. An opaque `data:`, `javascript:`, `vbscript:`, `mailto:`, `blob:`, `tel:` or `sms:` URL is cut down to `scheme:`. For the first three, the rest of the line goes too;"
-- **Ruling:** R29 for opaque URLs. R35 for `data:`, `javascript:` and `vbscript:` running to the end of the line, and for a filter that is linear in the line length. R12 and R14 for the port and for the tail ending at whitespace.
+- **Proposed:** "any `scheme://` URL is cut down to `scheme://host[:port]`: userinfo is removed, and so is everything after the authority up to the next whitespace. When the text before the authority's last `@` cannot be userinfo, the URL is cut down to `scheme://`, with no host. An opaque `data:`, `javascript:`, `vbscript:`, `mailto:`, `blob:`, `tel:` or `sms:` URL is cut down to `scheme:`, and for all of them but `blob:` the rest of the line goes too;"
+- **Ruling:** R29 for opaque URLs. R36, which amends R35, for which tails run to the end of the line, for tails that start with whitespace, and for the URL with no host. R35 for a filter that is linear in the line length. R12 and R14 for the port and for the tail ending at whitespace.
 - **Why:**
   - "Any URL" includes opaque URLs, which have no `//` and so no host. `mailto:guest@hotel.example` or a `data:text/html,…` page would otherwise reach the log whole.
-  - WebKit leaves raw spaces in `data:`, `javascript:` and `vbscript:` payloads, so stopping at whitespace would still log page content. Address schemes stop at whitespace, like a `scheme://` tail.
+  - WebKit leaves raw spaces in these opaque paths (`data:text/html,Mr Smith`, `tel:+44 20 7946 0123`, `mailto:Joe Smith <joe@…>`), so stopping at whitespace would still log page content or an address. Only `blob:` stops at whitespace: the browser makes those URLs, and they hold no spaces.
+  - WebKit also keeps whitespace right after the scheme (`data: text/html,…`, `mailto: joe@…`), but log prose has it too (`Error receiving data: %s`). So a tail that starts with a space or tab is a URL for `mailto:`, `tel:` and `sms:`, and for `data:` only when a `,` follows on the same line, as a data URL needs one. For `javascript:`, `vbscript:` and `blob:` it stays prose.
+  - The text before the last `@` cannot be userinfo when it holds a character that WebKit always percent-encodes in userinfo (`"` `<` `>` `` ` `` `{` `}` `|` `\` `^` `[` `]` `;` `=`, or a second `:`), or when it holds `'` or `)` while no path follows the authority. The `@` may then sit in text glued on after the URL (`(https://h.x)joe@hotel.example`), and the part before it may be a password, so neither part is logged. A canonical http(s) URL always has a path, so no real host is lost.
   - A `scheme://` tail runs to whitespace because WebKit keeps `)`, `]` and `'` raw in URLs (`/wiki/Foo_(bar)?token=…`). Stopping at one of them would leave the rest of the URL in the log. One closer is kept when the URL sits inside its opener, so prose stays readable.
   - The port carries no user data, and it tells the test listeners apart.
-  - The cost: text glued to a `data:` URL on the same line is lost, and a prose word such as `data:` followed directly by text loses that text.
+  - The cost is prose. Text after one of these opaque URLs on the same line is lost, so a load-failed line for them loses its ` (error)` suffix, and `Error receiving data: …, …` is cut after `data:`. A prose word such as `data:` followed directly by text loses that text too.
+  - Not covered: a `javascript:` or `vbscript:` tail that starts with whitespace, and a `data:` tail with no `,` after it, are logged as they are (R37). Plan Task 15 confirms on the device that WebKit never logs such URLs, or extends the redaction.
 
 ## Other deliberate differences
 
@@ -114,9 +118,11 @@ E1 to E6 are the corrections the final review asked for. E7 to E22 are the remai
 
 - **Where:** §6 step 8.5, line 323.
 - **The spec says:** "If `WAKELOCK` and xochitl was never stopped, write `wifi-signin` to `/sys/power/wake_unlock`."
-- **Proposed:** "If `WAKELOCK` and step 4 did not hand over to the exit lock (xochitl was never stopped, or was already active again), write `wifi-signin` to `/sys/power/wake_unlock`."
-- **Ruling:** part of R27's cleanup as reviewed.
-- **Why:** If xochitl is already back, for example after a triple press, step 4 does nothing. The literal text would then keep the 15-minute lock for its full term.
+- **Proposed:** "If `WAKELOCK` and step 4 did not run (xochitl was never stopped, or is already active again), write `wifi-signin` to `/sys/power/wake_unlock`."
+- **Ruling:** none: this is how the Task 9 implementation's cleanup has worked from the start (step 5 runs only when step 4 did not). R34 accepts the case where step 4 ran but could not take the exit lock.
+- **Why:**
+  - Cleanup can tell "was stopped" only from the `STOPPED_XOCHITL` token, which is recorded before the stop (E2). When `systemctl stop xochitl` fails and launch refuses with exit 12 (E14), the token is there although xochitl never stopped, and step 4 does nothing because xochitl is active. A rule keyed on the token alone would then keep the 15-minute lock for its full term. The same holds when something else has started xochitl again before cleanup runs.
+  - When step 4 runs, it drops the 15-minute lock itself, once the exit lock is held (E1). If the exit lock cannot be taken, step 4 keeps the 15-minute lock (R34), and step 5 does not drop it either: xochitl's start must never run without a wakelock, and that lock expires on its own.
 
 ### E9. §4 diagram: the exit wakelock comes before xochitl's start
 
@@ -149,7 +155,7 @@ E1 to E6 are the corrections the final review asked for. E7 to E22 are the remai
 - **Where:** §6 "appload-entry.sh", step 3, line 285.
 - **The spec says:** "`-p ExecStopPost=-$APP/cleanup …`"
 - **Proposed:** "`-p "ExecStopPost=-$APP/cleanup post" …`"
-- **Ruling:** R22(a). The code also runs `"${WS_SYSTEMD_RUN:-systemd-run}"`, a test-only seam (R30) that the spec need not name.
+- **Ruling:** R22(a). The code also runs `"$WS_SYSTEMD_RUN"`, which `lib.sh` defaults with `: "${WS_SYSTEMD_RUN:=systemd-run}"`: a test-only seam (R30) that the spec need not name.
 - **Why:** Cleanup has to know whether it runs from launch's trap or from ExecStopPost (E17).
 
 ### E13. §6 step 1: a stale lock is cleaned up before the takeover
