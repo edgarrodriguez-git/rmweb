@@ -239,6 +239,25 @@ start_watchdog() { # no ready file WS_READY_TIMEOUT_S after exec: SIGKILL the ap
 
 # shellcheck disable=SC2329  # called through ws_wait_cs
 app_execed() { ws_app_alive "$APP_PID" || ! kill -0 "$APP_PID" 2>/dev/null; }
+app_ended() { ! kill -0 "$APP_PID" 2>/dev/null; }
+
+# stop_unrecorded_app: TERM, up to WS_APP_TERM_WAIT_S for the app to end, then kill -9 and up to WS_HELPER_WAIT_S
+# more. No identity check is needed: APP_PID is our own child, which kill -0 finds only until it has ended (the shell
+# reaps it then), so no other process can hold that PID yet. Clears APP_PID once the app is collected; one that
+# survives kill -9 is left to cleanup, which leave hands its PID.
+stop_unrecorded_app() {
+  kill -TERM "$APP_PID" 2>/dev/null
+  if ! ws_wait_for "$WS_APP_TERM_WAIT_S" app_ended; then
+    ws_log "WARN: the unrecorded app is still running ${WS_APP_TERM_WAIT_S} s after TERM: kill -9"
+    kill -9 "$APP_PID" 2>/dev/null
+    if ! ws_wait_for "$WS_HELPER_WAIT_S" app_ended; then
+      ws_log "WARN: the unrecorded app survived kill -9 (stuck in the kernel?): leaving it to cleanup"
+      return 0
+    fi
+  fi
+  wait "$APP_PID"
+  APP_PID=
+}
 
 run_app() { # one run; sets APP_RC and APP_CS
   rm -f "$READY" "$WS_RUN/watchdog"
@@ -256,10 +275,13 @@ run_app() { # one run; sets APP_RC and APP_CS
   ) 2>"$WS_RUN/stderr" &
   APP_PID=$!
   if ! ws_state_add "APP=$APP_PID"; then
-    # Stopped through cleanup, which leave hands the PID. Its exec must show in its command line first (at most
-    # 1 s), or cleanup's identity check (ws_app_alive) would not know it as the app yet.
+    # cleanup knows an app only by its command line (ws_app_alive), which is still launch's until the exec, so
+    # launch stops this one itself, whether or not its exec shows within the 1 s wait (an exec under way still
+    # gets the TERM drain). stderr off: bash's job notice for a child that TERM or kill -9 ends.
+    ws_log "could not record APP=$APP_PID in $WS_RUN/state: stopping the app"
     ws_wait_cs 100 app_execed
-    refuse 12 "could not record APP=$APP_PID in $WS_RUN/state: stopping the app"
+    stop_unrecorded_app 2>/dev/null
+    refuse 12 "not going on without a record of the app"
   fi
   ws_log "app started (pid $APP_PID)"
   start_watchdog

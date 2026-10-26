@@ -11,7 +11,8 @@
 #     and releases its panel fd; `start` makes it active (units/xochitl.startfail = how many starts fail first;
 #     units/<unit>.stopfail = every stop fails and leaves the unit as it was).
 #     It also writes a HAZARD line for each device hazard it can see: xochitl stopped less than 30 s after its
-#     start, or started while an app or WPE helper is alive, or over the EPD lock. Every case requires none.
+#     start, or started while an app or WPE helper is alive (an app also before it shows in /proc: app.pids), or
+#     over the EPD lock. Every case requires none.
 #   - /proc/<pid>/{stat,cmdline,fd/} and /proc/{uptime,mounts} are plain files; mount and umount edit
 #     proc/mounts.
 #   - A full or broken /run: freeze_after names the state token after which the state file turns read-only (the
@@ -108,6 +109,9 @@ case $1 in
     if [ "$2" = xochitl ]; then
       for p in $(alive_matching 'wifi-signin-wpeqt|wpe-webkit-2\.0/WPE'); do
         echo "HAZARD: xochitl started while pid $p is alive" >> "$L"
+      done
+      for p in $(cat "$WST/app.pids" 2>/dev/null); do   # every fake app, registered in proc/ or not yet
+        if kill -0 "$p" 2>/dev/null; then echo "HAZARD: xochitl started while app pid $p is alive" >> "$L"; fi
       done
       [ -e "$WST/tmp/epframebuffer.lock" ] && echo "HAZARD: xochitl started over the EPD lock" >> "$L"
       f=$(cat "$U/xochitl.startfail" 2>/dev/null || echo 0)
@@ -221,7 +225,7 @@ write_app(){
 #!/bin/sh
 # fake wifi-signin-wpeqt: records the run, registers itself in the fake /proc, acts out $APP_MODE
 L="$WST/stub.log"
-echo "app run" >> "$L"
+echo "app run" >> "$L"; echo "$$" >> "$WST/app.pids"
 n=$(( $(cat "$WST/app.runs" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WST/app.runs"
 if [ -n "${APP_REGISTER_DELAY:-}" ]; then /bin/sleep "$APP_REGISTER_DELAY"; fi   # its exec not in /proc yet
 mkdir -p "$WS_PROC/$$"; printf '%s\000' "$0" > "$WS_PROC/$$/cmdline"
@@ -262,8 +266,8 @@ case ${APP_MODE:-online} in
   evgrab) if [ "$n" = 1 ]; then echo '[touch] EVIOCGRAB failed after 5 attempts - cannot run ungrabbed, exiting' >&2; exit 1; fi
           ready; exit 20 ;;
   watchdog63) echo 'Failed to initialize SWTCON' >&2; exit 63 ;;
-  stubborn) # alive but deaf to TERM: only cleanup's last-resort kill -9 ends it
-    ready; trap 'echo "app TERM ignored" >> "$L"' TERM
+  stubborn) # alive but deaf to TERM (from before its ready file): only a last-resort kill -9 ends it
+    trap 'echo "app TERM ignored" >> "$L"' TERM; ready
     /bin/sleep 30 & s=$!; echo "$s" >> "$WST/pids"
     while kill -0 "$s" 2>/dev/null; do wait "$s"; done; exit 0 ;;
 esac
@@ -808,6 +812,42 @@ EOF
     [ "$(cat "$T/units/xovi-tripletap.state")" = active ] || fail "xovi-tripletap is not active at the end"
     [ ! -s "$PROC/mounts" ] || fail "an overlay is still mounted: $(cat "$PROC/mounts")"
     [ -z "$(locks_held_after 40)" ] || fail "wakelocks still held 40 s after the refusal: $(locks_held_after 40)"
+    gone; common
+  done
+
+  # R34: the APP= record fails and the app's exec is still not in /proc when launch's 1 s wait ends (1.5 s here,
+  # with no settle hook). Its command line is then still launch's, so cleanup's identity check cannot know it:
+  # launch must stop its own child itself, before it refuses. The systemctl stub's app.pids check fails the case if
+  # the app is alive as xochitl starts. stubborn: the app ignores TERM, so only launch's kill -9 ends it.
+  for variant in slow-exec stubborn; do
+    setup "unrecorded_app_stopped_by_launch ($variant)"
+    echo MOUNTED > "$T/freeze_after"
+    if [ "$variant" = slow-exec ]; then
+      ENVX=(APP_MODE=hang APP_REGISTER_DELAY=1.5)
+    else
+      ENVX=(APP_MODE=stubborn)
+      cat > "$T/hooks/after_usleep" <<'EOF'
+#!/bin/sh
+# once the state is frozen, a settle returns only after the app's ready file (it ignores TERM by then)
+grep -q '^state frozen after' "$WST/stub.log" || exit 0
+i=0
+while [ "$i" -lt 100 ] && [ ! -e "$WST/run/wifi-signin/ready" ]; do /bin/sleep 0.05; i=$((i + 1)); done
+EOF
+      chmod +x "$T/hooks/after_usleep"
+    fi
+    start_bg "$APP/launch"; wait_bg 20
+    rc_is 12
+    want "state frozen after MOUNTED"; jwant "could not record APP="; jwant "[wifi-signin] exit 12 (display busy)"
+    restored
+    for p in $(cat "$T/app.pids" 2>/dev/null); do
+      if kill -0 "$p" 2>/dev/null; then fail "the app (pid $p) outlived the refusal"; fi
+    done
+    if [ "$variant" = stubborn ]; then
+      in_order "app run" "app TERM ignored" "umount $LIBEXEC"
+      jwant "WARN: the unrecorded app is still running 3 s after TERM: kill -9"
+    fi
+    [ "$(cat "$T/units/xochitl.state")" = active ] || fail "xochitl is $(cat "$T/units/xochitl.state") at the end"
+    [ ! -s "$PROC/mounts" ] || fail "an overlay is still mounted: $(cat "$PROC/mounts")"
     gone; common
   done
 fi
