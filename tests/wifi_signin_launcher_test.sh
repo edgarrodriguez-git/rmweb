@@ -689,6 +689,38 @@ n=$(grep -cF "WARN: WS_STOP_DEADLINE_S='20s' is not a whole number of seconds: u
 [ "$n" = 2 ] || fail "journal has the WS_STOP_DEADLINE_S warning $n times, want 2"
 jwant "cleanup done"; gone; common
 
+setup huge_stop_deadline_cleanup_still_restores
+# Probe P2 (R34): all digits, but too many for $(( )). dash aborted cleanup on $(( WS_STOP_DEADLINE_S * 100 ))
+# ("Illegal number") before xochitl's start, and ExecStopPost would have died the same way; bash wraps the value.
+printf 'WS_STOP_DEADLINE_S=99999999999999999999\n' > "$APP/launch.env"
+run "$APP/launch"
+rc_is 20
+count_is "app run" 1; restored; count_is "systemctl start xochitl" 1
+n=$(grep -cF "WARN: WS_STOP_DEADLINE_S='99999999999999999999' has 10 or more digits: using 20" "$JOURNAL")
+[ "$n" = 2 ] || fail "journal has the 20-digit WS_STOP_DEADLINE_S warning $n times, want 2 (launch and cleanup)"
+jwant "cleanup done"; gone; common
+
+setup validate_numbers_bounds
+# R34: an accepted value has at most 9 digits, so $(( x * 100 )) always fits; WS_REFRESH_S must be at least 1 (0
+# spins the refresher on `sleep 0`). The others keep 0: case 15 sets WS_READY_TIMEOUT_S=0 on purpose.
+out="$(env "${ARGS[@]}" "${TEST_SH:-/bin/sh}" -c '
+  . "$WS_APP/lib.sh"
+  WS_STOP_DEADLINE_S=99999999999999999999 WS_GUARD_S=1000000000 WS_GUARD_MAX_S=999999999 WS_REFRESH_S=0
+  WS_READY_TIMEOUT_S=0 WS_CARD_WAIT_S=0 WS_RETRY_WINDOW_S=0
+  ws_validate_numbers
+  echo "now $WS_STOP_DEADLINE_S $WS_GUARD_S $WS_GUARD_MAX_S $WS_REFRESH_S $WS_READY_TIMEOUT_S $WS_CARD_WAIT_S $WS_RETRY_WINDOW_S"
+  WS_REFRESH_S=1; ws_validate_numbers; echo "refresh $WS_REFRESH_S"' 2>&1)"
+echo "$out" | grep -qx 'now 20 30 999999999 60 0 0 0' ||
+  fail "after ws_validate_numbers: '$(echo "$out" | grep '^now')', want 'now 20 30 999999999 60 0 0 0'"
+echo "$out" | grep -qx 'refresh 1' || fail "WS_REFRESH_S=1 was not kept: '$(echo "$out" | grep '^refresh')'"
+for kv in "WS_STOP_DEADLINE_S='99999999999999999999' has 10 or more digits: using 20" \
+    "WS_GUARD_S='1000000000' has 10 or more digits: using 30" "WS_REFRESH_S='0' is below its minimum of 1: using 60"; do
+  echo "$out" | grep -qxF "[wifi-signin] WARN: $kv" || fail "ws_validate_numbers did not log 'WARN: $kv'"
+done
+n=$(echo "$out" | grep -c WARN)
+[ "$n" = 3 ] || fail "ws_validate_numbers logged $n WARN lines, want 3: $(echo "$out" | grep WARN | tr '\n' ';')"
+common
+
 setup tripletap_still_active_after_stop_refuses
 # The stop fails and xovi-tripletap keeps running: a triple press would then restart xochitl over the app.
 : > "$T/units/xovi-tripletap.stopfail"

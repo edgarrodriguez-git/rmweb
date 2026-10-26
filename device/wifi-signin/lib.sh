@@ -41,18 +41,25 @@ export PATH
 ws_log() { printf '[wifi-signin] %s\n' "$*"; }
 
 # ws_validate_numbers: launch and cleanup run it right after launch.env. A number of seconds that is not plain
-# decimal (empty, "20s", "abc", or a leading 0 that $(( )) reads as octal) goes back to its default, with a WARN:
-# dash and BusyBox ash abort the whole script on $(( 20s * 100 )), and cleanup must still reach xochitl's start.
+# decimal (empty, "20s", "abc", or a leading 0 that $(( )) reads as octal) or has 10 or more digits goes back to
+# its default, with a WARN: dash and BusyBox ash abort the whole script on $(( 20s * 100 )) or on a number too
+# large for it, and cleanup must still reach xochitl's start. With at most 9 digits, $(( x * 100 )) always fits.
+# WS_REFRESH_S must also be at least 1 (0 would spin the refresher on `sleep 0`); the others may be 0.
 # shellcheck disable=SC2154  # _ws_v and _ws_d are assigned through eval
 ws_validate_numbers() {
   for _ws_k in WS_GUARD_S WS_GUARD_MAX_S WS_CARD_WAIT_S WS_READY_TIMEOUT_S WS_RETRY_WINDOW_S WS_REFRESH_S \
       WS_APP_TERM_WAIT_S WS_HELPER_WAIT_S WS_STOP_DEADLINE_S; do
     eval "_ws_v=\${$_ws_k-}"
-    case $_ws_v in '' | *[!0-9]* | 0?*) ;; *) continue ;; esac
+    case $_ws_v in
+      '' | *[!0-9]* | 0?*) _ws_why='is not a whole number of seconds' ;;
+      ??????????*) _ws_why='has 10 or more digits' ;;
+      0) [ "$_ws_k" = WS_REFRESH_S ] || continue; _ws_why='is below its minimum of 1' ;;
+      *) continue ;;
+    esac
     eval "$_ws_k="
     ws_defaults
     eval "_ws_d=\$$_ws_k"
-    ws_log "WARN: $_ws_k='$_ws_v' is not a whole number of seconds: using $_ws_d"
+    ws_log "WARN: $_ws_k='$_ws_v' $_ws_why: using $_ws_d"
   done
 }
 
