@@ -72,8 +72,8 @@ int main() {
         CHECK(p.cls == ProbeClass::Captive && p.location.empty() && p.probeUrl == G);
         auto q = classifyProbe(ProbeKind::AppleSuccess, A, {true,200,"<html>portal</html>",19,loc});
         CHECK(q.cls == ProbeClass::Captive && q.location.empty());
-        auto c = combineCycle(true, p, ProbeVerdict{ProbeClass::ProbeOk,A,""}, TlsConfirm::Ok204);
-        CHECK(c.result == CycleResult::Captive && c.viewUrl == G && c.locationUrl.empty());
+        auto cyc = combineCycle(true, p, ProbeVerdict{ProbeClass::ProbeOk,A,""}, TlsConfirm::Ok204);
+        CHECK(cyc.result == CycleResult::Captive && cyc.viewUrl == G && cyc.locationUrl.empty());
     }
     {
         auto s = classifyProbe(ProbeKind::Google204, G, {true,302,"",0,"//evil.example/p"});   // scheme-relative: inherits http
