@@ -19,10 +19,10 @@
 #   - /sys/power/wake_lock and wake_unlock are symlinks to stub.log, so every write lands in order among the
 #     stub calls ("wifi-signin 900000000000", "wifi-signin-exit 30000000000", or "wifi-signin" for an unlock).
 #     locks_held_after replays them with the kernel's rule: a timed lock is only ever extended (R27).
-#   - Time: `sleep N` and `usleep N` move the fake boot clock (proc/uptime) by N seconds and really wait N/100
-#     (at least 10 ms), so the 30 s guard costs 0.3 s; each also adds N to the `slept` file. A sleep of 1000 s or more only waits (really, N/100):
-#     every case sets WS_REFRESH_S=100000, which parks the 60 s wakelock refresher so it neither spins nor moves
-#     the clock (refresher_rewrites_and_stops sets it to 1 to watch it work).
+#   - Time: `sleep N` and `usleep N` move the fake boot clock (proc/uptime) by N seconds, add N to the `slept`
+#     file and really wait N/100 (at least 10 ms), so the 30 s guard costs 0.3 s. A sleep of 1000 s or more only
+#     waits (really, N/100): every case sets WS_REFRESH_S=100000, which parks the 60 s wakelock refresher so it
+#     neither spins nor moves the clock (refresher_rewrites_and_stops sets it to 1 to watch it work).
 #   - A process that survives TERM and KILL (stuck in the e-ink driver on a tablet) is modelled by a zombie:
 #     kill -0 still finds it, and no signal removes it until its parent goes. APP_MODE=stubborn is a live app
 #     that ignores TERM, so only cleanup's kill -9 ends it.
@@ -223,6 +223,7 @@ write_app(){
 L="$WST/stub.log"
 echo "app run" >> "$L"
 n=$(( $(cat "$WST/app.runs" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$WST/app.runs"
+if [ -n "${APP_REGISTER_DELAY:-}" ]; then /bin/sleep "$APP_REGISTER_DELAY"; fi   # its exec not in /proc yet
 mkdir -p "$WS_PROC/$$"; printf '%s\000' "$0" > "$WS_PROC/$$/cmdline"
 [ -e "$WS_EPD_LOCK" ] && echo "HAZARD: app $n started over the EPD lock" >> "$L"
 : > "$WS_EPD_LOCK"
@@ -775,7 +776,20 @@ else
   for tok in - WAKELOCK TRIPLETAP STOPPED_XOCHITL MOUNTED; do
     setup "state_record_fails_after $tok"
     echo "$tok" > "$T/freeze_after"
-    ENVX=(APP_MODE=online); [ "$tok" = MOUNTED ] && ENVX=(APP_MODE=hang)   # the app must not outlive the refusal
+    ENVX=(APP_MODE=online)
+    if [ "$tok" = MOUNTED ]; then
+      # The app must not outlive the refusal, even while its exec is not yet visible in /proc (0.3 s here, far
+      # longer than cleanup takes to start): launch waits up to 1 s for it. Once the state is frozen, a settle
+      # returns only after the fake app has registered (at most 5 s), so that wait holds on any host.
+      ENVX=(APP_MODE=hang APP_REGISTER_DELAY=0.3)
+      cat > "$T/hooks/after_usleep" <<'EOF'
+#!/bin/sh
+grep -q '^state frozen after' "$WST/stub.log" || exit 0
+i=0
+while [ "$i" -lt 100 ] && ! grep -qs wifi-signin-wpeqt "$WST"/proc/[0-9]*/cmdline; do /bin/sleep 0.05; i=$((i + 1)); done
+EOF
+      chmod +x "$T/hooks/after_usleep"
+    fi
     start_bg "$APP/launch"; wait_bg 20
     rc_is 12
     want "state frozen after $tok"; jwant "could not record"; jwant "[wifi-signin] exit 12 (display busy)"
