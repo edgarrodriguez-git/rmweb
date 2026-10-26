@@ -24,7 +24,8 @@
 #     every case sets WS_REFRESH_S=100000, which parks the 60 s wakelock refresher so it neither spins nor moves
 #     the clock (refresher_rewrites_and_stops sets it to 1 to watch it work).
 #   - A process that survives TERM and KILL (stuck in the e-ink driver on a tablet) is modelled by a zombie:
-#     kill -0 still finds it, and no signal removes it until its parent goes.
+#     kill -0 still finds it, and no signal removes it until its parent goes. APP_MODE=stubborn is a live app
+#     that ignores TERM, so only cleanup's kill -9 ends it.
 #   - The fake app (app/bin/wifi-signin-wpeqt) registers itself in the fake /proc and waits on a REAL
 #     /bin/sleep, so it never moves the clock. APP_MODE picks what it does; HELPER=1 also starts a fake
 #     WPEWebProcess.
@@ -142,6 +143,7 @@ echo "clock at umount: $(awk '{ print $1 }' "$WST/proc/uptime" 2>/dev/null)" >> 
 echo "slept at umount: $(cat "$WST/slept" 2>/dev/null | awk '{ s += $1 } END { printf "%.2f", s }')" >> "$WST/stub.log"
 mp=; for a in "$@"; do mp=$a; done
 grep -vF -- " $mp overlay " "$WST/proc/mounts" > "$WST/proc/mounts.new"; mv -f "$WST/proc/mounts.new" "$WST/proc/mounts"
+if [ -x "$WST/hooks/after_umount" ]; then "$WST/hooks/after_umount"; fi
 exit 0
 EOF
   cat > "$T/stubs/sleep" <<'EOF'
@@ -259,6 +261,10 @@ case ${APP_MODE:-online} in
   evgrab) if [ "$n" = 1 ]; then echo '[touch] EVIOCGRAB failed after 5 attempts - cannot run ungrabbed, exiting' >&2; exit 1; fi
           ready; exit 20 ;;
   watchdog63) echo 'Failed to initialize SWTCON' >&2; exit 63 ;;
+  stubborn) # alive but deaf to TERM: only cleanup's last-resort kill -9 ends it
+    ready; trap 'echo "app TERM ignored" >> "$L"' TERM
+    /bin/sleep 30 & s=$!; echo "$s" >> "$WST/pids"
+    while kill -0 "$s" 2>/dev/null; do wait "$s"; done; exit 0 ;;
 esac
 exit 99
 EOF
@@ -374,6 +380,7 @@ count_is "wifi-signin" 1                          # R27: the 15 min lock is drop
 nowant_re "ActiveEnterTimestamp"                  # the guard never uses the monotonic clock
 want "xochitl stopped at age 990 (pid 4242)"
 count_is "app run" 1
+count_is "systemctl start xochitl" 1; count_is "systemctl reset-failed xochitl" 1   # one start: StartLimitBurst=4
 for kv in "RMWEB_KIOSK=captive" "RMWEB_PROFILE=$RUN/profile" "RMWEB_COOKIES=0" "XDG_CACHE_HOME=$RUN/xdg/cache" \
     "XDG_DATA_HOME=$RUN/xdg/data" "XDG_CONFIG_HOME=$RUN/xdg/config" "MESA_SHADER_CACHE_DISABLE=true" \
     "WS_READY_FILE=$RUN/ready" "WS_LOG=$T/user/log" "QT_QPA_PLATFORM=epaper" "LD_LIBRARY_PATH=$T/runtime/lib"; do
@@ -536,6 +543,15 @@ nowant "app run"; nowant_re "^mount "
 count_is "sleep 1" 0                              # not active and not starting: refused at once, no guard wait
 in_order "wifi-signin 900000000000" "systemctl stop xovi-tripletap" "wifi-signin" "systemctl start xovi-tripletap"
 jwant "another program owns the display"; jwant "[wifi-signin] exit 12 (display busy)"; gone; common
+
+setup xochitl_still_active_after_stop_refuses
+: > "$T/units/xochitl.stopfail"                   # the stop fails and xochitl keeps the panel
+run "$APP/launch"
+rc_is 12
+nowant "app run"; nowant_re "^mount "; nowant "systemctl start xochitl"; nowant "systemctl reset-failed xochitl"
+in_order "systemctl stop xochitl" "systemctl is-active --quiet xochitl" "wifi-signin" "systemctl start xovi-tripletap"
+jwant "WARN: systemctl stop xochitl failed"; jwant "xochitl is still active after the stop: not launching"
+jwant "[wifi-signin] exit 12 (display busy)"; gone; common
 
 setup card_held_after_wait_skips_app_and_restores
 mkdir -p "$PROC/777/fd"; ln -s "$CARD" "$PROC/777/fd/3"
@@ -799,6 +815,43 @@ in_order "app run" "umount $LIBEXEC" "wifi-signin-exit 30000000000" "wifi-signin
   "systemctl start xochitl" "usleep 2000000" "systemctl reset-failed xochitl" "systemctl start xochitl" \
   "systemctl start xovi-tripletap"
 count_is "systemctl start xochitl" 2; jwant "WARN"; gone; common
+
+setup xochitl_never_returns_tripletap_still_restarted
+# Both starts fail: tripletap still comes back, because its triple press (xovi/start) is then the owner's way
+# to bring xochitl back.
+echo 2 > "$T/units/xochitl.startfail"
+run "$APP/launch"
+rc_is 20
+in_order "app run" "umount $LIBEXEC" "systemctl start xochitl" "usleep 2000000" "systemctl reset-failed xochitl" \
+  "systemctl start xochitl" "systemctl start xovi-tripletap"
+count_is "systemctl start xochitl" 2; jwant "ERROR: xochitl is still not active"
+[ "$(cat "$T/units/xochitl.state")" = failed ] || fail "xochitl is $(cat "$T/units/xochitl.state"), want failed"
+[ "$(cat "$T/units/xovi-tripletap.state")" = active ] || fail "xovi-tripletap was not restarted"
+gone; common
+
+setup live_app_ignoring_term_gets_kill_9
+# A live app (not a zombie) that ignores TERM: after the 3 s drain and the 10 s helper wait, cleanup kills it
+# with SIGKILL, and xochitl starts only once it is gone.
+ENVX=(APP_MODE=stubborn)
+start_bg "$APP/launch"
+if wait_ready; then kill -TERM "$LPID"; fi
+wait_bg 20
+rc_is 137                                         # the app's own end
+in_order "app run" "app TERM ignored" "umount $LIBEXEC"; restored
+jwant "the app is still running 3 s after TERM"; jwant "WARN: the app or WPE helpers remain after 10 s: kill -9"
+jnowant "survived kill -9"; jwant "[wifi-signin] exit 137 (killed by signal 9)"; gone; common
+
+setup exit_lock_fails_keeps_the_session_lock
+# The 30 s exit lock cannot be taken: the 15 min lock is then kept (it expires on its own) rather than dropped,
+# so xochitl's start is never left without a wakelock.
+printf '#!/bin/sh\nrm -f "$WST/sys/power/wake_lock"; mkdir "$WST/sys/power/wake_lock"\n' > "$T/hooks/after_umount"
+chmod +x "$T/hooks/after_umount"
+run "$APP/launch"
+rc_is 20
+nowant "wifi-signin-exit 30000000000"; nowant "wifi-signin"
+in_order "app run" "umount $LIBEXEC" "systemctl reset-failed xochitl" "systemctl start xochitl" \
+  "systemctl start xovi-tripletap"
+jwant "WARN: could not take the exit wakelock: keeping the 15 min one"; gone; common
 
 setup helpers_killed_before_xochitl_returns
 ENVX=(APP_MODE=hang HELPER=1)

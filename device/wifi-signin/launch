@@ -61,7 +61,9 @@ leave() {
   reap "$REFRESH_PID"; REFRESH_PID=        # before cleanup rewrites or drops the wakelock
   if [ -n "$ARMED" ]; then
     if [ -n "$APP_PID" ] && ! ws_state_has "APP=$APP_PID"; then ws_state_add "APP=$APP_PID"; fi
-    "$WS_APP/cleanup" trap ${APP_PID:+"$APP_PID"}
+    # cleanup keeps our stderr (fd 3); bash's "Killed" job notice for an app that cleanup's kill -9 ends goes to
+    # /dev/null instead of the journal, as in run_app's wait.
+    { "$WS_APP/cleanup" trap ${APP_PID:+"$APP_PID"} 2>&3 3>&-; } 3>&2 2>/dev/null
   fi
   if [ -z "$REFUSED" ] && [ -n "$APP_PID" ] && ! kill -0 "$APP_PID" 2>/dev/null; then
     wait "$APP_PID" 2>/dev/null
