@@ -670,6 +670,7 @@ public:
 
 **Carry-forward from Part A (2026-10-25):**
 - Before step 2, check whether a 3.29 SDK exists under `remarkable-codex-toolchain/3.29.*` and prefer it (the Paper Pro runs 3.29); Task 17's `image()` must match the choice. (ledger: R6)
+  - Result: the 3.29 check found none, so 3.28.0.172 / 5.8.203 stays and Task 17's `image()` is unchanged. (ledger: R40)
 - Before step 1, run `brew install ninja librsvg colima docker docker-buildx`: Task 1 installed only what Part A needed, and Task 12's icon needs `rsvg-convert`. (ledger: R2)
 - `fast-build.sh` and `gen-app-sdk.incontainer.sh` are the first rmbrowser ports: add rmbrowser's copyright line from its LICENSE to `NOTICE`, and move the Wi-Fi Sign-in section above NOTICE's closing disclaimer. (ledger: Task 1 minor (deferred))
 
@@ -681,7 +682,7 @@ public:
 **Interfaces:**
 - Produces: `./scripts/fast-build.sh app` builds `build/wifi-signin-wpeqt` (an aarch64 ELF) from `engine/wpeqt` against `third_party/appsdk` and the rmweb 0.9.7 runtime libraries. It differs from rmbrowser's script in two ways: it uses `third_party/appsdk` instead of `build/appsdk`, and it names its output `build/wifi-signin-wpeqt`.
 
-- [ ] **Step 1: Start Colima.** Run `colima start --vm-type vz --cpu 6 --memory 8 --disk 80`. Expected: `docker info --format '{{.Architecture}}'` prints `aarch64`.
+- [ ] **Step 1: Start Colima.** Run `colima start --vm-type vz --cpu 6 --memory 8 --disk 80 --mount "/Volumes/2TB OWC 1M2/Developer/Remarkable:w"`. The mount is needed because the repo is outside `$HOME`, so `docker run -v "$PWD":/work` can see it. Colima's home is on the OWC drive (`~/.colima` → `/Volumes/2TB OWC 1M2/Developer/.colima`), so builds need that drive connected. (ledger: R41) Expected: `docker info --format '{{.Architecture}}'` prints `aarch64`.
 - [ ] **Step 2: Fetch the SDK and pin it.**
   1. Download the 3.28 installer (497,093,913 bytes).
   2. Check that `openssl dgst -md5 -binary FILE | base64` equals `YyZX2wvtMWETPKx4FXsgNQ==`, the `x-goog-hash` md5.
@@ -689,7 +690,7 @@ public:
   4. Expected: `./scripts/fetch-sdk.sh` ends with `Saved & verified`.
 - [ ] **Step 3: Build the toolchain image.** Use the command in `toolchain/README.md`, tagged `rmweb-sdk`. Expected: `docker run --rm rmweb-sdk bash -lc 'echo $SDKTARGETSYSROOT'` prints a path ending in `cortexa53-crypto-remarkable-linux`.
 - [ ] **Step 4: Generate and vendor the headers.**
-  1. `./scripts/fast-build.sh sdk`.
+  1. `./scripts/fast-build.sh sdk`. It fetches and verifies `rmweb-0.9.7.tar.gz` and `wpewebkit-2.48.5.tar.xz` (a checksum mismatch fails the run), and it produces `build/release/rmweb-0.9.7`, which Tasks 11, 12 and 15 use. (ledger: R39)
   2. Copy `build/appsdk/usr` to `third_party/appsdk/usr`.
   3. Write the README.
   4. Expected: `ls third_party/appsdk/usr/include` shows `wpe-webkit-2.0 libsoup-3.0 wpe-1.0 xkbcommon`.
