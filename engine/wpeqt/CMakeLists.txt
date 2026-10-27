@@ -12,7 +12,7 @@ qt_standard_project_setup()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WPE REQUIRED IMPORTED_TARGET
-    wpe-webkit-2.0 wpe-platform-2.0 glib-2.0 gobject-2.0)
+    wpe-webkit-2.0 wpe-platform-2.0 libsoup-3.0 glib-2.0 gobject-2.0 gio-2.0)
 
 qt_add_executable(rmweb-wpeqt main.cpp)
 target_link_libraries(rmweb-wpeqt PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick PkgConfig::WPE)

@@ -10,10 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       patchelf \
     && rm -rf /var/lib/apt/lists/*
 
-# The SDK installer (~467 MB) is bind-mounted from the build context (not COPYed),
+# The SDK installer (~497 MB) is bind-mounted from the build context (not COPYed),
 # so it never lands in an image layer. Run via `sh` so no +x bit is needed.
 # Filename hardcoded (matches scripts/fetch-sdk.sh) for reproducibility.
-RUN --mount=type=bind,source=toolchain/sdk/remarkable-production-image-5.7.119-ferrari-public-aarch64-toolchain.sh,target=/tmp/sdk.sh \
+RUN --mount=type=bind,source=toolchain/sdk/remarkable-production-image-5.8.203-ferrari-public-aarch64-toolchain.sh,target=/tmp/sdk.sh \
     sh /tmp/sdk.sh -y -d /opt/rmpp-sdk
 
 # Convenience: auto-source the SDK env in interactive shells.

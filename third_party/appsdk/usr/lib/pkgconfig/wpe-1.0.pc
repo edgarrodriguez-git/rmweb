@@ -1,0 +1,11 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: wpe
+Description: libwpe (headers only)
+Version: 1.16.2
+Requires: 
+Libs: -L${libdir} -lwpe-1.0
+Cflags: -I${includedir}/wpe-1.0

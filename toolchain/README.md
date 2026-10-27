@@ -13,12 +13,12 @@ cross-compile everything we deploy to the device.
   colima start --cpu 14 --memory 32 --disk 150 --vm-type vz --mount-type virtiofs
   ```
 - **`docker-buildx` is required** — the Dockerfile uses `RUN --mount=type=bind` (BuildKit) to install
-  the SDK without baking the 467 MB installer into an image layer.
+  the SDK without baking the 497 MB installer into an image layer.
 
 ## Build the image
 
 ```sh
-./scripts/fetch-sdk.sh                                   # downloads the ~467 MB SDK installer (gitignored)
+./scripts/fetch-sdk.sh                                   # downloads the ~497 MB SDK installer (gitignored)
 docker build -f toolchain/Dockerfile -t rmweb-sdk .      # installs the SDK into the image at /opt/rmpp-sdk
 ```
 
@@ -37,7 +37,7 @@ docker run --rm -it -v "$PWD":/work rmweb-sdk
 | Env script | `source /opt/rmpp-sdk/environment-setup-cortexa53-crypto-remarkable-linux` (sets `$CC`,`$CXX`,`$CFLAGS`,`$SDKTARGETSYSROOT`,`$CMAKE_TOOLCHAIN_FILE`,…) |
 | Base CFLAGS | `-O2 -pipe -g -feliminate-unused-debug-types` |
 
-The SDK matches device firmware 3.27.x (scarthgap, glibc 2.39) — ABI-compatible with the on-device
+The SDK (3.28.0.172, distro 5.8.203) matches device firmware 3.28.x (scarthgap, glibc 2.39) — ABI-compatible with the on-device
 libraries (see `../docs/device-profile.md`).
 
 ## Helper scripts
