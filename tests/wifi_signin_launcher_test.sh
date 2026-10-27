@@ -330,6 +330,16 @@ wait_ready(){ # until the fake app has written the ready file (the background la
     sleep 0.05
   done
 }
+wait_app_run(){ # wait_app_run SECONDS: until the fake app has logged "app run" (APP_MODE=noready never writes the
+  # ready file, so wait_ready cannot tell); the background launch must stay up. Polls like wait_bg, so the bound is
+  # generous: on macOS the first exec of each freshly written stub costs 0.2-0.5 s, and every case writes fresh ones.
+  local i=0
+  while ! grep -qxF -- "app run" "$STUBLOG"; do
+    kill -0 "$LPID" 2>/dev/null || { fail "launch exited before the app started"; return 1; }
+    i=$((i+1)); [ "$i" -le $(( $1 * 20 )) ] || { fail "no 'app run' in stub.log $1 s after launch started"; return 1; }
+    sleep 0.05
+  done
+}
 
 want(){   grep -qxF -- "$1" "$STUBLOG" || fail "stub.log lacks '$1'"; }
 nowant(){ ! grep -qxF -- "$1" "$STUBLOG" || fail "stub.log has unexpected '$1'"; }
@@ -657,11 +667,19 @@ rc_is 137
 count_is "app run" 1; nowant "usleep 3000000"; restored; jwant "no ready file"; jnowant "retrying"; gone; common
 
 setup ready_timeout_zero_disables
+# The watchdog runs from the app's start, so the margin is measured from there too. How long launch needs to get to
+# the app varies (the first exec of each freshly written stub costs 0.2-0.5 s on macOS), and a fixed sleep from
+# launch's start can end before the app has even run. So: wait for "app run", then 1.2 s more. The default 30 s
+# watchdog (`sleep 30` is 0.3 s at the stubs' 1/100 time scale) would have fired within that.
 printf 'WS_READY_TIMEOUT_S=0\n' > "$APP/launch.env"   # the dev-only override hook (plan Task 12)
 ENVX=(APP_MODE=noready)
 start_bg "$APP/launch"
-sleep 1.2                                         # the default 30 s watchdog would have fired after 0.3 s
-if kill -0 "$LPID" 2>/dev/null; then kill -TERM "$LPID"; else fail "launch ended on its own"; fi
+if wait_app_run 20; then
+  sleep 1.2
+  if kill -0 "$LPID" 2>/dev/null; then kill -TERM "$LPID"; else fail "launch ended on its own"; fi
+else
+  kill -TERM "$LPID" 2>/dev/null                  # wind launch down instead of leaving wait_bg to sit out its 20 s
+fi
 wait_bg 20
 rc_is 0
 count_is "app run" 1; in_order "app run" "app TERM"; restored
