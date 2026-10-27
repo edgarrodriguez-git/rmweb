@@ -677,7 +677,7 @@ public:
 **Files:**
 - Modify: `scripts/fetch-sdk.sh` (the URL becomes `https://storage.googleapis.com/remarkable-codex-toolchain/3.28.0.172/remarkable-production-image-5.8.203-ferrari-public-aarch64-toolchain.sh`, plus its SHA256), `toolchain/Dockerfile` and `toolchain/README.md` (the SDK file name becomes 5.8.203), `engine/wpeqt/CMakeLists.txt` (add `libsoup-3.0 gio-2.0` to `pkg_check_modules(WPE ...)`)
 - Create (ported from rmbrowser, MIT): `scripts/fast-build.sh`, `engine/gen-app-sdk.incontainer.sh`
-- Create: `third_party/appsdk/usr/**` (generated headers and pkg-config files, committed; they stand in for the spec §7 `wpewebkit-2.48.5.tar.xz` package source, see Task 17) and `third_party/appsdk/README.md` (provenance, regeneration command, licenses: WebKit LGPL-2.1+/BSD, libsoup LGPL-2.0+, libwpe BSD-2, xkbcommon MIT)
+- Create: `third_party/appsdk/usr/**` (generated headers and pkg-config files, committed; they stand in for the spec §7 `wpewebkit-2.48.5.tar.xz` package source, see Task 17), `third_party/appsdk/LICENSES/` (the license texts that go with the headers) and `third_party/appsdk/README.md` (provenance, regeneration command; its "Licenses" section states the license of each header group, which can differ per file)
 
 **Interfaces:**
 - Produces: `./scripts/fast-build.sh app` builds `build/wifi-signin-wpeqt` (an aarch64 ELF) from `engine/wpeqt` against `third_party/appsdk` and the rmweb 0.9.7 runtime libraries. It differs from rmbrowser's script in two ways: it uses `third_party/appsdk` instead of `build/appsdk`, and it names its output `build/wifi-signin-wpeqt`.

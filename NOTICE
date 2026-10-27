@@ -33,7 +33,8 @@ Vendored components (source shipped in this repo)
 * App-SDK headers (third_party/appsdk/) — public headers used only to compile
   engine/wpeqt; license texts in third_party/appsdk/LICENSES/, provenance in
   third_party/appsdk/README.md. WPE WebKit/JSC: LGPL-2.0+/2.1+ (three files
-  BSD-2-Clause, WebKitSettings.h BSD-3-Clause). libsoup: LGPL-2.0+
+  BSD-2-Clause, WebKitSettings.h BSD-3-Clause). WPEPlatform
+  (wpe-webkit-2.0/wpe-platform, 28 headers): BSD-2-Clause. libsoup: LGPL-2.0+
   (soup-websocket.h and soup-websocket-connection.h LGPL-2.1+). libwpe:
   BSD-2-Clause (wpe/gamepad.h Apache-2.0, wpe/keysyms.h X11, The Open Group).
   libxkbcommon: MIT/X11.
