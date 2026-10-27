@@ -30,6 +30,10 @@ Vendored components (source shipped in this repo)
 -------------------------------------------------
 * Mozilla Readability.js (engine/wpeqt/reader/) — Apache-2.0,
   Copyright (c) 2010 Arc90 Inc. See engine/wpeqt/reader/LICENSE.
+* App-SDK headers (third_party/appsdk/) — generated public headers of WPE WebKit
+  (LGPL-2.0+/2.1+, BSD-2-Clause), libsoup (LGPL-2.0+), libwpe (BSD-2-Clause) and
+  libxkbcommon (MIT), used only to compile engine/wpeqt. Licenses, provenance
+  and regeneration: third_party/appsdk/README.md.
 
 Iconography
 -----------

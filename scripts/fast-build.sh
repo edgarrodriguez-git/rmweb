@@ -8,8 +8,8 @@
 # Copyright (c) 2026 Eugene Tarakanov and contributors. Differences from the original:
 #   * `sdk` verifies both downloads (rmweb release tarball, WPE source tarball) and fails closed;
 #     the generator container is pinned by digest instead of the floating debian:trixie tag.
-#   * `app` compiles against the committed third_party/appsdk (not build/appsdk) and writes
-#     build/wifi-signin-wpeqt.
+#   * `app` compiles against the committed third_party/appsdk (not build/appsdk), writes
+#     build/wifi-signin-wpeqt, and keeps the SDK's own $LDFLAGS (the original replaced them).
 #   * The `package` and `all` modes are left out (packaging is a later task).
 #
 #   ./scripts/fast-build.sh sdk   # fetch + verify the 0.9.7 release and WPE 2.48.5 source, unpack the
@@ -84,8 +84,9 @@ app() {
     # clobbering an SDK lib); the whole bundle lib/ is the rpath-link for their transitive deps.
     for l in libWPEWebKit-2.0 libWPEPlatform-2.0 libsoup-3.0 libwpe-1.0; do cp -an "$REL/lib/$l".so* "$SR/usr/lib/"; done
     rm -rf /work/build/wpeqt
+    # Keep the SDK LDFLAGS (--as-needed and co.): setting CMAKE_EXE_LINKER_FLAGS replaces them otherwise.
     cmake -S /work/engine/wpeqt -B /work/build/wpeqt -G Ninja -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath-link,$REL/lib"
+          -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS -Wl,-rpath-link,$REL/lib"
     cmake --build /work/build/wpeqt -j"$(nproc)"
     cp -f /work/build/wpeqt/rmweb-wpeqt "$OUT_BIN"
     ls -l "$OUT_BIN"'

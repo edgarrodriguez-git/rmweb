@@ -52,9 +52,11 @@ The tree was generated on 2026-10-26.
 diff -r build/appsdk/usr third_party/appsdk/usr    # empty output = the committed tree is reproducible
 ```
 
+Regeneration installs the current trixie `-dev` packages, so a later run can differ from the committed
+tree; diff it against `third_party/appsdk/usr` before replacing anything. Compare the `[appsdk] debs:`
+line of the run with the versions above.
+
 To replace the committed tree, run `rm -rf third_party/appsdk/usr && cp -R build/appsdk/usr third_party/appsdk/usr`.
-The three Debian packages come from the live trixie archive, so a package update there can change
-those headers. Compare the `[appsdk] debs:` line of the run with the versions above.
 
 ## Licenses
 

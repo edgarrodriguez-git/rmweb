@@ -14,7 +14,12 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(WPE REQUIRED IMPORTED_TARGET
     wpe-webkit-2.0 wpe-platform-2.0 libsoup-3.0 glib-2.0 gobject-2.0 gio-2.0)
 
+# Build as a PIE (ASLR): the app runs as root and parses network data in-process.
+include(CheckPIESupported)
+check_pie_supported(LANGUAGES CXX)
+
 qt_add_executable(rmweb-wpeqt main.cpp)
+set_target_properties(rmweb-wpeqt PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(rmweb-wpeqt PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick PkgConfig::WPE)
 # WPE/WebKit pull in GLib's gio, whose GDBus structs have members named `signals`/`slots`.
 # Disable Qt's `signals`/`slots`/`emit` keyword macros (we use Q_SIGNALS/Q_SLOTS/Q_EMIT).
