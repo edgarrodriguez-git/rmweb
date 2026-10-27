@@ -5,20 +5,23 @@
 # from Debian. Together with the release tarball's prebuilt .so files this is enough to compile and
 # link engine/wpeqt WITHOUT the multi-hour WebKit build (see scripts/fast-build.sh).
 #
-# Output: /work/build/appsdk/usr/{include,lib/pkgconfig}
+# Output: /work/build/appsdk/usr/{include,lib/pkgconfig} and /work/build/appsdk/LICENSES (the license
+# texts that go with those headers: LGPL redistribution needs a copy)
 #
 # Ported from rmbrowser (https://github.com/jhasubhash/rmbrowser, engine/gen-app-sdk.incontainer.sh),
 # MIT, Copyright (c) 2026 Eugene Tarakanov and contributors. Differences from the original: the
 # `[appsdk] debs:` log line (records the exact Debian package versions the libwpe/libsoup/xkbcommon
 # headers came from; they are copied into third_party/appsdk/README.md), and the two `ls *.h |
-# grep -v` pipelines are now the headers_except helper (same files, same order) so shellcheck is clean.
+# grep -v` pipelines are now the headers_except helper (same files, same order) so shellcheck is clean,
+# and the "license texts" section (everything under LICENSES/) is new.
 # shellcheck disable=SC2016  # the pkg-config templates below keep ${prefix}/${libdir} literal on purpose
 set -euo pipefail
 VER=2.48.5; MAJ=2; MIN=48; MIC=5
 SRC=/work/build/src/wpesrc/Source        # extracted by scripts/fast-build.sh
 OUT=/work/build/appsdk/usr
+LIC=/work/build/appsdk/LICENSES
 INC="$OUT/include/wpe-webkit-2.0"
-rm -rf "$OUT"; mkdir -p "$INC/wpe" "$INC/jsc" "$INC/wpe-platform/wpe/headless" "$OUT/lib/pkgconfig"
+rm -rf "$OUT" "$LIC"; mkdir -p "$INC/wpe" "$INC/jsc" "$INC/wpe-platform/wpe/headless" "$OUT/lib/pkgconfig"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
@@ -89,6 +92,32 @@ TMP=$(mktemp -d); ( cd "$TMP" && apt-get download -qq libwpe-1.0-dev libsoup-3.0
 echo "[appsdk] debs: $(cd "$TMP" && printf '%s ' ./*.deb | sed 's|\./||g')"
 for d in "$TMP"/*.deb; do dpkg-deb -x "$d" "$TMP/x"; done
 cp -a "$TMP/x/usr/include/wpe-1.0" "$TMP/x/usr/include/libsoup-3.0" "$TMP/x/usr/include/xkbcommon" "$OUT/include/"
+
+# ---- license texts ----
+# WebKit's own license files (extracted from the verified tarball by scripts/fast-build.sh); the WebKit
+# headers point at COPYING.LIB.
+mkdir -p "$LIC/webkit" "$LIC/debian" "$LIC/common-licenses"
+for f in WebCore/LICENSE-LGPL-2 WebCore/LICENSE-LGPL-2.1 WebCore/LICENSE-APPLE JavaScriptCore/COPYING.LIB; do
+  cp "$SRC/$f" "$LIC/webkit/"
+done
+# Debian copyright file of each -dev package. In trixie these are real files; fail instead of vendoring
+# nothing if a package ever turns its doc dir into a symlink to the runtime package's.
+for p in libwpe-1.0-dev libsoup-3.0-dev libxkbcommon-dev; do
+  c="$TMP/x/usr/share/doc/$p/copyright"
+  if [ -L "$TMP/x/usr/share/doc/$p" ] || [ -L "$c" ] || [ ! -f "$c" ]; then
+    echo "[appsdk] $p: no regular copyright file in the package" >&2; exit 1
+  fi
+  cp "$c" "$LIC/debian/$p.copyright"
+done
+# Full texts the copyright files and headers refer to, from the pinned image (/usr/share/common-licenses):
+# LGPL-2 (libwpe), LGPL-2.1 (libsoup), MPL-2.0 (libsoup's copyright file), Apache-2.0 (libwpe wpe/gamepad.h).
+for l in LGPL-2 LGPL-2.1 MPL-2.0 Apache-2.0; do
+  if [ -L "/usr/share/common-licenses/$l" ] || [ ! -f "/usr/share/common-licenses/$l" ]; then
+    echo "[appsdk] /usr/share/common-licenses/$l is not a regular file" >&2; exit 1
+  fi
+  cp "/usr/share/common-licenses/$l" "$LIC/common-licenses/"
+done
+echo "[appsdk] licenses: $(find "$LIC" -type f | wc -l) files in $LIC"
 
 # ---- pkg-config (prefix=/usr; the build seeds these into the SDK sysroot) ----
 pc() { printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\n\nName: %s\nDescription: %s\nVersion: %s\nRequires: %s\nLibs: %s\nCflags: %s\n' "$@"; }

@@ -747,6 +747,7 @@ public:
 - A D-state app that survives FINAL_SIGKILL lets `--collect` drop the failed unit, so `appload-entry.sh` would start a session over it: decide whether it also refuses while an app or WPE helper exists. (ledger: Task 9 POINTER for Task 12)
 - Step 5 deletes only the file `$APP/launch.env` (its `WS_READY_TIMEOUT_S=0` turns the start-up watchdog off); the hook code stays. Then the journal's start line must not mention `with overrides from`. (ledger: R5)
 - After step 3, check that XOVI survived the `systemctl stop`/`start xochitl` pair: the AppLoad icon is still there without a triple press. (ledger: final review launcher-safety declinedToJudge#5)
+- After step 3's first takeover, deploy the unmodified `build/wifi-signin-wpeqt` (`./scripts/deploy-wifi-signin.sh --app build/wifi-signin-wpeqt`, same `launch.env`) and repeat step 3's checks, so an SDK 5.8.203 or PIE problem shows up before Task 13's captive changes. (ledger: R50)
 - Run the launcher host test under the shell device-facts reports and add that run to CI: `apt-get install busybox`, `WS_TEST_SH` = a symlink named `ash` to busybox (`'/bin/busybox sh'` breaks the harness's quoting). (ledger: final review tests-ci#6)
 - Cleanup now takes `wifi-signin-exit 30000000000`, then unlocks `wifi-signin` (the Timings row "Final timed wakelock" says so now); 40 s after each exit, `grep -w wifi-signin /sys/power/wake_lock` prints nothing. (ledger: R27)
 - Consider `-p KillMode=mixed` (systemd TERMs only `launch`; today the app gets a second TERM mid-drain), but only if test 4(b) still passes: with mixed, a dead `launch` leaves the app to the final SIGKILL. (ledger: Task 9 M1)
@@ -1071,6 +1072,7 @@ The tablet must also be on a Wi-Fi network, because the probe checks wlan0's def
 - That run is also the first shellcheck 0.9.0 (apt) run over `device/wifi-signin/*`: R34(d)'s `disable=SC2317,SC2329` directives must leave it clean, and a missing shellcheck fails there (R34(f)). (ledger: R34(d), R34(f))
 - `entry_no_systemd_run_exits_13` must pass there with `WS_SYSTEMD_RUN` set to a missing path: no case may reach the host's real `systemd-run`, `systemctl` or `mount`. (ledger: R30)
 - If Task 10 chose a 3.29 SDK, `image()` uses the matching `eeems/remarkable-toolchain` tag, not `5.8.203-aarch64`. (ledger: R6)
+- Step 4's `-DCMAKE_EXE_LINKER_FLAGS` keeps the SDK's own `$LDFLAGS` (`--as-needed` and the others), as `fast-build.sh` does, so the binary's NEEDED list matches upstream's. (ledger: R45)
 
 **Files:**
 - Create: `packaging/vellum/rmweb-runtime/VELBUILD`, `packaging/vellum/wifi-signin/VELBUILD`, `.github/workflows/vellum-package.yml`, `docs/wifi-signin/README.md`
@@ -1115,7 +1117,7 @@ rmweb-NOTICE::https://raw.githubusercontent.com/exp78/rmweb/v$pkgver/NOTICE
   1. Source the first `environment-setup-*` under `/opt/codex/ferrari`, as `packages/highlight-reflow` does.
   2. Copy `third_party/appsdk/usr/.` into `$SDKTARGETSYSROOT/usr/`.
   3. Copy `libWPEWebKit-2.0`, `libWPEPlatform-2.0`, `libsoup-3.0` and `libwpe-1.0` from the extracted runtime into `$SDKTARGETSYSROOT/usr/lib/` without overwriting anything.
-  4. Run `cmake -S engine/wpeqt -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,<runtime>/lib`, using `-G Ninja` if `ninja` exists, otherwise Unix Makefiles, then `cmake --build build`.
+  4. Run `cmake -S engine/wpeqt -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS -Wl,-rpath-link,<runtime>/lib"`, using `-G Ninja` if `ninja` exists, otherwise Unix Makefiles, then `cmake --build build`.
 - `package()` installs the following into `$pkgdir/home/root/xovi/exthome/appload/wifi-signin/`: `build/rmweb-wpeqt` as `bin/wifi-signin-wpeqt`; `lib.sh`, `appload-entry.sh`, `launch` and `cleanup` (mode 755); `external.manifest.json` and `icon.png`. It installs `LICENSE` and `NOTICE` under `licenses/wifi-signin/`.
 - Hooks:
   - `postinstall()` echoes `Refresh AppLoad to see Wi-Fi Sign-in`;

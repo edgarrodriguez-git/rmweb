@@ -13,7 +13,7 @@
 #   * The `package` and `all` modes are left out (packaging is a later task).
 #
 #   ./scripts/fast-build.sh sdk   # fetch + verify the 0.9.7 release and WPE 2.48.5 source, unpack the
-#                                 # release into build/release/rmweb-0.9.7, generate headers (build/appsdk)
+#                                 # release into build/release/rmweb-0.9.7, generate build/appsdk/{usr,LICENSES}
 #   ./scripts/fast-build.sh app   # compile build/wifi-signin-wpeqt in the rmweb-sdk container
 #
 # Prereqs: Docker (linux/arm64) and the rmweb-sdk image (toolchain/README.md).
@@ -68,7 +68,9 @@ sdk() {
   tar -xJf "$src" -C build/src/wpesrc --strip-components=1 \
       "wpewebkit-$WPE_VER/Source/WebKit/UIProcess/API" "wpewebkit-$WPE_VER/Source/WebKit/WPEPlatform" \
       "wpewebkit-$WPE_VER/Source/WebKit/Scripts/glib" "wpewebkit-$WPE_VER/Source/WebKit/PlatformWPE.cmake" \
-      "wpewebkit-$WPE_VER/Source/JavaScriptCore/API/glib" "wpewebkit-$WPE_VER/Source/JavaScriptCore/GLib.cmake"
+      "wpewebkit-$WPE_VER/Source/JavaScriptCore/API/glib" "wpewebkit-$WPE_VER/Source/JavaScriptCore/GLib.cmake" \
+      "wpewebkit-$WPE_VER/Source/WebCore/LICENSE-LGPL-2" "wpewebkit-$WPE_VER/Source/WebCore/LICENSE-LGPL-2.1" \
+      "wpewebkit-$WPE_VER/Source/WebCore/LICENSE-APPLE" "wpewebkit-$WPE_VER/Source/JavaScriptCore/COPYING.LIB"
   docker run --rm --platform linux/arm64 -v "$PWD":/work "$DEBIAN_IMAGE" bash /work/engine/gen-app-sdk.incontainer.sh
 }
 
